@@ -9,6 +9,16 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// The `electron` package's main entry, when required/imported from a plain
+// Node context (not Electron's own runtime), resolves to the absolute path
+// of the platform binary itself — Electron.app/.../Electron on macOS,
+// electron.exe on Windows, no .bin wrapper script or shell involved. Using
+// this instead of node_modules/.bin/electron[.cmd] sidesteps a real
+// Windows-only bug found via this project's own CI (see LESSONS.md):
+// spawning a .cmd file directly (without `shell: true`) fails with
+// `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
+// were a binary.
+import electronBinPath from 'electron';
 
 const projectRoot = path.join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const pdfsDir = path.join(projectRoot, 'pdf-files', 'screenshot-files');
@@ -100,18 +110,12 @@ function killElectron(child) {
   }
 }
 
-const electronBin = path.join(
-  projectRoot,
-  'node_modules',
-  '.bin',
-  process.platform === 'win32' ? 'electron.cmd' : 'electron',
-);
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
 
 const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-screenshots-userdata-'));
 const child = spawn(
-  electronBin,
+  electronBinPath,
   ['.', `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${userDataDir}`, '--window-size=1280,860'],
   // `detached: true` puts this whole process tree in its own process group
   // — see the comment on killElectron() above for why that matters.
