@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- No remote content is ever loaded (see CLAUDE.md architecture notes) —
+         this is a second layer on top of contextIsolation/sandbox, mainly to
+         cap what an exploited renderer could do: connect-src 'self' removes
+         any exfiltration channel, script-src 'self' blocks injected remote
+         script. worker-src needs blob: for pdf.js's worker; style-src needs
+         'unsafe-inline' for this file's inline <style> block above plus
+         imperative element.style writes throughout renderer.js. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+    />
+    <title>PageBoard</title>
+    <style>
+      /* `border-box` everywhere: `width`/`height` (including when set via
+         JS, see renderer.js applyBakedSizes()/syncCanvasColumnHeaderWidth())
+         then consistently means the actually rendered size including
+         padding — without this, e.g. the sticky label in Canvas mode would
+         appear wider than the page below it despite an exactly matching
+         width set, due to its own `padding` — see LESSONS.md. */
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      /* Central icon configuration (Tabler Icons, see src/icons.mjs): ONE
+         place for stroke width and color that every `.icon` element picks
+         up via custom-property inheritance. A single icon instance can
+         override `--icon-color` locally (e.g. the delete icon, see
+         renderer.js) — same variable, just more narrowly scoped, no second
+         mechanism needed. Color is deliberately not `currentColor`: buttons
+         like `.icon-button:disabled` already control their grayed-out state
+         via `opacity`, not text color — a separate icon color value
+         independent of text color avoids the two mechanisms overriding each
+         other. */
+      :root {
+        --icon-stroke-width: 2;
+        --icon-color: #cccccc;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #3a3d3f;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        color: #eee;
+      }
+
+      #app {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* --- Global toolbar (Concept 2, mockup: shared by both views) --- */
+      #toolbar {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 16px;
+        background: #2c2e30;
+        border-bottom: 1px solid #1c1d1e;
+        position: relative;
+        z-index: 1001; /* stays usable even in focus mode (z-index 1000) */
+      }
+
+      #toolbar .title {
+        font-weight: 600;
+        margin-right: 8px;
+      }
+
+      #toolbar button {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        font-size: 13px;
+        cursor: pointer;
+        background: #4a4d4f;
+        color: #eee;
+        border: 1px solid #616465;
+        border-radius: 4px;
+        transition: background-color 120ms ease;
+      }
+
+      #toolbar button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      #toolbar button:hover:not(:disabled) {
+        background: #5a5d5f;
+      }
+
+      /* Icons instead of color emoji (Phase 15): emoji glyphs like the 💾
+         previously used here render differently depending on the OS's emoji
+         font (Apple Color Emoji vs. Segoe UI Emoji — different colors/
+         shapes), which works against the "identical appearance on Mac/
+         Windows" goal (Concept 5.2). Inline SVG with `currentColor` is
+         instead drawn by Chromium itself, pixel-identical on every
+         platform. */
+      .icon {
+        flex: 0 0 auto;
+        display: block;
+        stroke-width: var(--icon-stroke-width);
+        stroke: var(--icon-color);
+      }
+
+      #shortcuts-button,
+      #options-button {
+        padding: 6px 9px;
+      }
+
+      /* Icon-only toolbar buttons that act on the current page selection
+         (duplicate/rotate/delete) — gray/disabled with no selection, active
+         once at least one page is selected (see updateSelectionVisuals() in
+         renderer.js). Same size as #shortcuts-button for a consistent
+         toolbar rhythm. */
+      .toolbar-action-button {
+        padding: 6px 9px;
+      }
+
+      .toolbar-divider {
+        width: 1px;
+        align-self: stretch;
+        background: #4a4d4f;
+        margin: 4px 2px;
+      }
+
+      #toolbar .spacer {
+        flex: 1;
+      }
+
+      #grid-columns-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        color: #ccc;
+      }
+
+      #grid-columns-label.hidden {
+        display: none;
+      }
+
+      #grid-columns-select {
+        background: #4a4d4f;
+        color: #eee;
+        border: 1px solid #616465;
+        border-radius: 4px;
+        padding: 4px 6px;
+      }
+
+      #view-switcher {
+        display: flex;
+        border: 1px solid #616465;
+        border-radius: 4px;
+        overflow: hidden;
+      }
+
+      #view-switcher button {
+        border: none;
+        border-radius: 0;
+      }
+
+      #view-switcher button.active {
+        background: #6cb2ff;
+        color: #0b1f33;
+      }
+
+      /* --- Empty starting state (6.1) --- */
+      #empty-state {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        border: 2px dashed #888;
+        margin: 24px;
+        border-radius: 8px;
+        transition: border-color 150ms ease, background-color 150ms ease;
+      }
+
+      #empty-state.hidden {
+        display: none;
+      }
+
+      #empty-state p {
+        margin: 0;
+        color: #ccc;
+      }
+
+      .empty-state-icon {
+        color: #6b6e70;
+        transition: color 150ms ease;
+      }
+
+      /* Visible feedback while a PDF dragged in from outside (Finder/
+         Explorer) hovers over the drop zone — previously there was no
+         visual signal for this at all, even though the drop itself already
+         worked. */
+      #empty-state.drag-active {
+        border-color: #6cb2ff;
+        background: rgba(108, 178, 255, 0.06);
+      }
+
+      #empty-state.drag-active .empty-state-icon {
+        color: #6cb2ff;
+      }
+
+      /* --- Canvas mode (2.1) --- */
+      #canvas-view {
+        flex: 1;
+        overflow: auto;
+        padding: 16px;
+        cursor: grab;
+      }
+
+      #canvas-view.hidden {
+        display: none;
+      }
+
+      #canvas-view.panning {
+        cursor: grabbing;
+      }
+
+      /* Zoom applies uniformly across the whole canvas (2.1). CSS `zoom`
+         (instead of `transform: scale`) correctly changes layout/scroll
+         extents along with it — Electron guarantees Chromium, so this is
+         unproblematic. Also important for focus mode: unlike `transform`,
+         `zoom` creates no new containing block, so `position: fixed` inside
+         still correctly relates to the viewport. */
+      #canvas-zoom-wrapper {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-start;
+        /* Custom properties instead of fixed px values: renderer.js keeps
+           them in sync with `bakedZoom` via applyBakedSizes(), so spacing
+           grows along with the pages during the sharpening re-render
+           instead of snapping back to its base size abruptly (see
+           LESSONS.md). */
+        gap: var(--column-gap, 16px);
+        width: max-content;
+        /* Centers the row of documents within the visible area as long as
+           it's narrower than #canvas-view. `margin: auto` instead of
+           `justify-content: center` on the scroll container: the latter has
+           a known issue in combination with `overflow: auto` where the left
+           part of the content becomes unreachable by scrolling once it
+           overflows. `margin: auto` instead collapses cleanly to 0 once the
+           content becomes wider than the container, and normal, unsurprising
+           scrolling takes over — the existing cursor anchor while zooming
+           (which only measures real on-screen positions before/after) is
+           unaffected by this. */
+        margin: 0 auto;
+      }
+
+      .canvas-column {
+        flex: 0 0 auto;
+        width: 380px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .canvas-column .section-header {
+        position: sticky;
+        top: 0;
+        background: #2c2e30;
+        border-radius: 4px;
+      }
+
+      .canvas-pages {
+        display: flex;
+        flex-direction: column;
+        gap: var(--page-gap, 8px);
+      }
+
+      /* --- Grid view (2.2): stacked sections, alternating gray tones --- */
+      #grid-view {
+        flex: 1;
+        overflow: auto;
+        padding: 0 16px 16px;
+      }
+
+      #grid-view.hidden {
+        display: none;
+      }
+
+      .grid-section {
+        padding: var(--section-padding-v, 12px) var(--section-padding-h, 16px);
+      }
+
+      .grid-section.tone-a {
+        background: #35383a;
+      }
+
+      .grid-section.tone-b {
+        background: #3f4244;
+      }
+
+      .grid-section .section-header {
+        background: transparent;
+        margin-bottom: 8px;
+      }
+
+      /* Fixed column count instead of automatic wrapping based on available
+         width (Concept 2.2): renderer.js sets `grid-template-columns`
+         inline when building each section. Zooming therefore only changes
+         tile size, never which row a page belongs to. `margin: auto`
+         centers the row(s) once they're narrower than the available space —
+         same reasoning as #canvas-zoom-wrapper for avoiding
+         `justify-content: center`. */
+      .grid-pages {
+        display: grid;
+        gap: var(--thumb-gap, 10px);
+        width: max-content;
+        margin: 0 auto;
+      }
+
+      /* --- Shared section-header component (filename, dirty dot, save, close) --- */
+      .section-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 8px;
+        font-size: 13px;
+        cursor: grab;
+      }
+
+      /* Whole document is currently being dragged via its header (Concept 6.2). */
+      .document-container.drag-source {
+        opacity: 0.5;
+      }
+
+      .section-header-name {
+        min-width: 0; /* lets the flex item shrink below its text width */
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .dirty-dot {
+        color: #6cb2ff;
+      }
+
+      .section-header-spacer {
+        flex: 1;
+      }
+
+      .icon-button {
+        background: transparent;
+        border: none;
+        color: #ccc;
+        font-size: 14px;
+        cursor: pointer;
+        padding: 2px 6px;
+        border-radius: 3px;
+        transition: background-color 120ms ease;
+      }
+
+      .icon-button:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .icon-button:disabled {
+        cursor: not-allowed;
+        opacity: 0.4;
+      }
+
+      /* Placeholder slot while a page hasn't been rasterized yet (canvas
+         virtualization, Concept section 7). */
+      .page-slot {
+        flex: 0 0 auto;
+        max-width: 100%;
+        background: #55585a;
+        border-radius: 2px;
+      }
+
+      .page-slot.rendered {
+        background: transparent;
+      }
+
+      /* Placeholder slot (Concept 3.3): document is completely empty.
+         Deliberately no text (see legend in mockups-ansichtsmodi.md) — the
+         dashed border alone is enough of a cue. */
+      .placeholder-slot {
+        border: 2px dashed #6b6e70;
+        border-radius: 4px;
+        background: transparent;
+      }
+
+      /* Highlighted as the current drop target while dragging a page
+         (dropping pages onto the placeholder reactivates the document) —
+         replaces the usual thin bar here, since without a neighboring page
+         there's nothing for it to dock against. */
+      .placeholder-slot.drop-target {
+        border-color: #6cb2ff;
+        background: rgba(108, 178, 255, 0.08);
+      }
+
+      /* --- Drag & drop of pages (Concept 3.2) --- */
+      .page-slot.drag-source {
+        opacity: 0.35;
+      }
+
+      /* Thin bar between two target pages (drop indicator). Deliberately a
+         `position: fixed` overlay rather than a real element inserted into
+         the layout: in Grid view, an inserted element would occupy its own
+         CSS Grid cell and shift the wrapping — as an overlay, its position
+         can simply be computed from the target page instead, without
+         disturbing the layout. */
+      .drop-indicator {
+        position: fixed;
+        display: none;
+        background: #6cb2ff;
+        box-shadow: 0 0 4px rgba(108, 178, 255, 0.8);
+        border-radius: 2px;
+        z-index: 1002;
+        pointer-events: none;
+      }
+
+      /* Custom drag image for multi-selection (see startPageDrag in
+         renderer.js) — positioned off-screen; `setDragImage()` still
+         captures it synchronously on dragstart. */
+      .drag-badge {
+        position: fixed;
+        top: -9999px;
+        left: -9999px;
+        background: #2c2e30;
+        color: #eee;
+        padding: 6px 10px;
+        border-radius: 4px;
+        font-size: 12px;
+        border: 1px solid #6cb2ff;
+      }
+
+      /* Page selection (Concept 3.1) — same highlight in Canvas and Grid
+         view, since both use the same .page-slot structure. */
+      .page-slot.selected canvas.page-thumb {
+        outline: 3px solid #6cb2ff;
+        outline-offset: -3px;
+      }
+
+      canvas.page-thumb {
+        display: block;
+        max-width: 100%;
+        height: auto;
+        background: white;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+        cursor: pointer;
+      }
+
+      /* --- Focus mode (2.3): double-clicking a page → toggleFocusMode() in
+         renderer.js zooms onto exactly that page via the normal zoom
+         mechanism (zoomAtPoint) rather than a separate overlay — the page
+         is actually re-rendered large (sharp), not just visually scaled up.
+         What's left here is just hiding the other pages/documents:
+         deliberately `display: none`, not `visibility: hidden` — the latter
+         would keep the (zoomed-along, and therefore huge at a high zoom
+         level) layout width of the hidden columns/sections, so the focused
+         page wouldn't be centered but would sit somewhere on the left in a
+         huge invisible empty space (see LESSONS.md). `display: none` lets
+         the layout collapse onto the one page; `scrollIntoView()` in
+         toggleFocusMode() then centers it within exactly that collapsed
+         layout. */
+      .focus-active .document-container:not(:has(.focused)) {
+        display: none;
+      }
+
+      .focus-active .page-slot:not(.focused),
+      .focus-active .placeholder-slot,
+      .focus-active .section-header {
+        display: none;
+      }
+
+      /* Grid sets `grid-template-columns` inline (fixed column count, see
+         renderGridView) — that stays in effect even with only one visible
+         page (empty but still-reserved column tracks), so the focused page
+         would hang on the left in column 1 instead of being centered
+         (unlike Canvas' flexbox, which has no concept of empty tracks and
+         automatically shrinks to the one visible piece of content).
+         `!important` is needed to override the inline-set column count
+         (higher specificity than a normal class rule). See LESSONS.md. */
+      .focus-active .grid-pages {
+        grid-template-columns: none !important;
+      }
+
+      .document-container.highlight {
+        outline: 3px solid #6cb2ff;
+      }
+
+      #toast {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: #222;
+        color: #eee;
+        padding: 8px 16px;
+        border-radius: 4px;
+        font-size: 13px;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s ease;
+      }
+
+      #toast.visible {
+        opacity: 0.95;
+      }
+
+      /* --- Empty-documents dialog on save (Concept 4.3), keyboard-shortcuts overview (Phase 15) --- */
+      @keyframes modal-fade-in {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+
+      @keyframes modal-pop-in {
+        from {
+          opacity: 0;
+          transform: scale(0.97);
+        }
+        to {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 2000;
+        animation: modal-fade-in 120ms ease;
+      }
+
+      .modal-dialog {
+        background: #2c2e30;
+        border: 1px solid #616465;
+        border-radius: 8px;
+        padding: 20px 24px;
+        min-width: 420px;
+        max-width: 90vw;
+        max-height: 80vh;
+        overflow-y: auto;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        animation: modal-pop-in 150ms ease;
+      }
+
+      .modal-dialog h2 {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+
+      .modal-dialog p {
+        margin: 0 0 16px;
+        font-size: 13px;
+        color: #ccc;
+      }
+
+      /* Sub-heading inside a modal dialog (e.g. "Display"/"Updates"/"Info"
+         in the Options dialog) — sits between the h2 and the first row of
+         controls for that section. */
+      .modal-section-heading {
+        margin: 20px 0 4px;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #999;
+      }
+
+      .modal-section-heading:first-of-type {
+        margin-top: 4px;
+      }
+
+      /* `.modal-doc-row` was named for the empty-documents dialog but is a
+         generic label+control row layout — `.modal-row` is the same rule
+         under a name that also fits non-document settings rows (Options
+         dialog). */
+      .modal-doc-row,
+      .modal-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 8px 0;
+        border-top: 1px solid #444;
+        font-size: 13px;
+      }
+
+      .modal-doc-row select,
+      .modal-row select {
+        background: #4a4d4f;
+        color: #eee;
+        border: 1px solid #616465;
+        border-radius: 4px;
+        padding: 4px 6px;
+      }
+
+      .modal-row-hint {
+        margin: -4px 0 0;
+        font-size: 11px;
+        color: #888;
+      }
+
+      .modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 20px;
+      }
+
+      .modal-actions button,
+      .modal-info-actions button {
+        padding: 6px 14px;
+        font-size: 13px;
+        cursor: pointer;
+        background: #4a4d4f;
+        color: #eee;
+        border: 1px solid #616465;
+        border-radius: 4px;
+        transition: background-color 120ms ease;
+      }
+
+      .modal-actions button:hover,
+      .modal-info-actions button:hover {
+        background: #5a5d5f;
+      }
+
+      /* Secondary, informational buttons in the Options dialog's Info
+         section (View on GitHub / Licenses) — stacked and left-aligned,
+         unlike `.modal-actions`' right-aligned primary confirm/cancel row. */
+      .modal-info-actions {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+        margin: 4px 0 16px;
+      }
+
+      /* --- Keyboard-shortcuts overview (Phase 15) --- */
+      .shortcuts-list {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        align-items: center;
+        gap: 10px 16px;
+        font-size: 13px;
+        margin: 0;
+      }
+
+      .shortcuts-list dt {
+        margin: 0;
+      }
+
+      .shortcuts-list kbd {
+        background: #4a4d4f;
+        border: 1px solid #616465;
+        border-radius: 4px;
+        padding: 3px 7px;
+        font-family: inherit;
+        font-size: 12px;
+        white-space: nowrap;
+        justify-self: start;
+      }
+
+      .shortcuts-list dd {
+        margin: 0;
+        color: #ccc;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="toolbar">
+        <span class="title">PageBoard</span>
+        <button id="open-button" type="button" data-i18n-title="toolbar.openTitle"><span data-i18n="toolbar.open"></span></button>
+        <button id="save-all-button" type="button" disabled data-i18n-title="toolbar.saveAllTitleDisabled">
+          <span data-i18n="toolbar.saveAll"></span>
+        </button>
+        <div class="toolbar-divider"></div>
+        <!-- Act on the current page selection (see applyPageAction in
+             renderer.js) — disabled/gray with no selection, active once at
+             least one page is selected. Deliberately in addition to the
+             still-existing context menu + keyboard shortcuts, not a
+             replacement for them (see comment above applyPageAction). -->
+        <button
+          id="duplicate-button"
+          type="button"
+          class="toolbar-action-button"
+          disabled
+          data-i18n-title="toolbar.duplicateTitle"
+          data-i18n-aria-label="toolbar.duplicateTitle"
+        ></button>
+        <button
+          id="rotate-left-button"
+          type="button"
+          class="toolbar-action-button"
+          disabled
+          data-i18n-title="toolbar.rotateLeftTitle"
+          data-i18n-aria-label="toolbar.rotateLeftTitle"
+        ></button>
+        <button
+          id="rotate-right-button"
+          type="button"
+          class="toolbar-action-button"
+          disabled
+          data-i18n-title="toolbar.rotateRightTitle"
+          data-i18n-aria-label="toolbar.rotateRightTitle"
+        ></button>
+        <button
+          id="delete-button"
+          type="button"
+          class="toolbar-action-button"
+          disabled
+          data-i18n-title="toolbar.deleteTitle"
+          data-i18n-aria-label="toolbar.deleteTitle"
+        ></button>
+        <div class="toolbar-divider"></div>
+        <button
+          id="shortcuts-button"
+          type="button"
+          data-i18n-title="toolbar.shortcutsTitle"
+          data-i18n-aria-label="toolbar.shortcutsTitle"
+        ></button>
+        <button
+          id="options-button"
+          type="button"
+          data-i18n-title="toolbar.optionsTitle"
+          data-i18n-aria-label="toolbar.optionsTitle"
+        ></button>
+        <span class="spacer"></span>
+        <div id="view-switcher">
+          <button id="canvas-view-button" type="button" class="active" data-i18n-title="toolbar.canvasViewTitle"><span data-i18n="toolbar.canvasView"></span></button>
+          <button id="grid-view-button" type="button" data-i18n-title="toolbar.gridViewTitle"><span data-i18n="toolbar.gridView"></span></button>
+        </div>
+        <label id="grid-columns-label" class="hidden" data-i18n-title="toolbar.gridColumnsLabelTitle">
+          <span data-i18n="toolbar.gridColumnsLabel"></span>
+          <select id="grid-columns-select">
+            <option value="5">5</option>
+            <option value="8" selected>8</option>
+            <option value="10">10</option>
+            <option value="12">12</option>
+            <option value="15">15</option>
+            <option value="all">--</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="empty-state">
+        <div id="empty-state-icon-slot"></div>
+        <p data-i18n="emptyState.dragHint"></p>
+        <button id="empty-open-button" type="button"><span data-i18n="emptyState.openButton"></span></button>
+      </div>
+
+      <div id="canvas-view" class="hidden">
+        <div id="canvas-zoom-wrapper"></div>
+      </div>
+      <div id="grid-view" class="hidden">
+        <div id="grid-zoom-wrapper"></div>
+      </div>
+    </div>
+    <div id="toast"></div>
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>

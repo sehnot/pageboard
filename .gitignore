@@ -1,0 +1,24 @@
+node_modules/
+dist/
+out/
+.DS_Store
+*.log
+
+# Writable working copies of pdf-files/test-files/ for manually testing the
+# save flow (see CLAUDE.md/README.md) — deliberately modified/deleted during
+# that, so not version-controlled.
+pdf-files/test-files-edit/
+
+# Internal concept/planning material and Claude working notes —
+# deliberately not part of the versioned repo.
+konzept/
+LESSONS.md
+CLAUDE.md
+TESTING.md
+GITHUB.md
+QUALITYCHECK.md
+
+# Claude Code's own local session/permission settings — previously only
+# excluded via a global (machine-level) gitignore, which protects the
+# maintainer but not a fresh clone or another contributor.
+.claude/

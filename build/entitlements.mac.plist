@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!-- Genuinely required by Chromium/V8's JIT under macOS's hardened
+         runtime — without these two, the packaged app doesn't launch at
+         all once signed. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- `disable-library-validation` (lets unsigned/third-party dylibs load
+         into this signed process) and `allow-dyld-environment-variables`
+         (permits DYLD_INSERT_LIBRARIES-style injection) were both dropped:
+         this app has no native (.node) modules — every dependency
+         (electron-updater, pdf-lib, pdfjs-dist) is pure JS — so neither is
+         actually needed, and both meaningfully widen what hardened runtime
+         otherwise protects against. Verified via a local
+         `npm run build:mac` + launching the resulting app without them. -->
+  </dict>
+</plist>

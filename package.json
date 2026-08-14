@@ -1,0 +1,70 @@
+{
+  "name": "pageboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local desktop app (Mac & Windows) for organizing multiple PDF files at once: reorder, delete, rotate, duplicate, and merge pages across documents on a shared canvas.",
+  "main": "main/main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sehnot/pageboard.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test --test-concurrency=1 test/**/*.test.mjs",
+    "screenshots": "node scripts/generate-screenshots.mjs",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win"
+  },
+  "keywords": ["pdf", "electron", "desktop-app", "page-organizer"],
+  "author": "sehnot",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^3.1.1",
+    "@tabler/icons": "^3.46.0",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.2.108"
+  },
+  "build": {
+    "appId": "com.pageboard.app",
+    "productName": "PageBoard",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main/**/*",
+      "preload/**/*",
+      "renderer/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": ["dmg"],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "afterSign": "scripts/notarize.js",
+    "win": {
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "github"
+    }
+  }
+}

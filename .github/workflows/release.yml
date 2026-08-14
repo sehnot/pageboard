@@ -1,0 +1,50 @@
+name: Release
+
+# Runs on every push of a "v*" tag (e.g. v1.0.0) and builds on both
+# platforms (Concept 5.4: the Mac build has to be built on Mac, the Windows
+# build on Windows — no cross-compiling). electron-builder --publish always
+# uploads the finished artifacts directly as a GitHub release.
+#
+# Code signing/notarization is deliberately optional (see CLAUDE.md, Phase
+# 16): without the secrets below, electron-builder automatically builds
+# unsigned (users see Gatekeeper/SmartScreen warnings); once certificates
+# exist, setting the secrets in the repo (Settings → Secrets and variables →
+# Actions) is enough — this file doesn't need to change for that.
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - run: npm ci
+
+      - name: Build & publish
+        run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Prevents electron-builder from looking for a local keychain
+          # identity on CI runners (never present there anyway) —
+          # regardless of whether signing via CSC_LINK happens below.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # Mac: code signing (.p12 certificate, base64-encoded) + notarization
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows: code-signing certificate (.pfx, base64-encoded)
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
