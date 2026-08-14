@@ -1,0 +1,78 @@
+name: CI
+
+# Runs on every push to dev or main. No pull_request trigger needed: GitHub
+# matches required status checks by commit SHA, not by the event that
+# produced the check — the push-triggered `test` run on dev already covers
+# the later dev→main PR on that same commit, so a duplicate pull_request
+# trigger would just re-test it for nothing.
+on:
+  push:
+    branches: [dev, main]
+
+permissions:
+  contents: write # needed for the screenshot bot-commit back to dev
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm test
+
+  # Only on dev, only one platform (Chromium renders identically regardless
+  # of OS — see CLAUDE.md), and only commits if the regenerated PNGs
+  # actually changed. Bot-committed screenshots reach main the normal way,
+  # via the next dev->main PR — never pushed there directly (main is
+  # protected, and a bot push would be rejected the same as anyone else's).
+  screenshots:
+    needs: test
+    if: github.ref == 'refs/heads/dev'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run screenshots
+      - name: Commit regenerated screenshots (if changed)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/screenshots
+          git diff --cached --quiet || git commit -m "chore: regenerate screenshots [skip ci]"
+          git push
+
+  # Unsigned dev builds as a downloadable workflow artifact — separate from
+  # release.yml (tag-triggered, signed, publishes to GitHub Releases).
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            build_cmd: npm run build:mac
+          - os: windows-latest
+            build_cmd: npm run build:win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: ${{ matrix.build_cmd }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pageboard-${{ matrix.os }}
+          path: dist/
+          retention-days: 14
