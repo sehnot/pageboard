@@ -226,8 +226,14 @@ test('double-click in Canvas mode enlarges the page to fill the frame and center
   // CANVAS_COLUMN_WIDTH) — a before/after width comparison would therefore
   // be misleading. Height, on the other hand, isn't stretched (the flex
   // main axis, follows the actual render resolution) and is thus the
-  // reliable growth signal.
-  assert.ok(focused.height > before_.height * 1.3, 'page should be noticeably taller in focus mode than before');
+  // reliable growth signal. The growth ratio is height-bound here (see
+  // FOCUS_MODE_FILL_RATIO below) and thus a function of window.innerHeight
+  // alone, which isn't this test's to control — a real run measured 1.2
+  // (1000x700 CI-like window) up to 1.4 (1200x800 local, minus title-bar
+  // chrome eating into innerHeight). 1.15 stays well clear of that observed
+  // range on the low end while still catching a real "barely moved" bug
+  // (ratio ~1.0), see LESSONS.md.
+  assert.ok(focused.height > before_.height * 1.15, 'page should be noticeably taller in focus mode than before');
   // Fill the frame: close to the window size on at least one axis
   // (FOCUS_MODE_FILL_RATIO = 0.92 in renderer.js, tolerated more generously here).
   assert.ok(focused.width >= windowSize.w * 0.6 || focused.height >= windowSize.h * 0.6, 'page should approximately fill the frame');
@@ -287,9 +293,9 @@ test('a second double-click restores the previous zoom level/position', async ()
   await new Promise((r) => setTimeout(r, 600));
 
   const focused = await rectOf('.page-slot.focused');
-  // Compare height instead of width — see the comment in the first test
-  // case (width is already set to the column width via flex-stretch beforehand).
-  assert.ok(focused.height > before_.height * 1.3, 'page should be taller in focus mode');
+  // Compare height instead of width — see the comment (and the threshold
+  // rationale) in the first test case.
+  assert.ok(focused.height > before_.height * 1.15, 'page should be taller in focus mode');
 
   const centerFocused = centerOf(focused);
   await realDoubleClick(centerFocused.x, centerFocused.y);
