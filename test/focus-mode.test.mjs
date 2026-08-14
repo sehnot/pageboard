@@ -326,8 +326,19 @@ test('manually zooming in focus mode exits it without jumping to the first page 
 
   // Focus the third (last) document — a jump to the first page would be
   // clearly distinguishable here from correctly "staying in place", unlike
-  // with the first document.
+  // with the first document. Unlike the earlier tests in this file (which
+  // all target the FIRST page-slot, already visible at scrollLeft 0), the
+  // third document's column isn't guaranteed to be scrolled into view at
+  // this point — explicitly scroll to it first, otherwise its computed
+  // "center" coordinate could fall outside the actual viewport, and a real
+  // click dispatched there hits nothing.
   const thirdDocId = await evaluate(`__mod.store.documents[2].id`);
+  await evaluate(`
+    document.querySelector('.document-container[data-document-id="${thirdDocId}"] .page-slot')
+      .scrollIntoView({ block: 'center', inline: 'center' });
+    true;
+  `);
+  await new Promise((r) => setTimeout(r, 200));
   const before_ = await rectOf(`.document-container[data-document-id="${thirdDocId}"] .page-slot`);
   const c = centerOf(before_);
   await realDoubleClick(c.x, c.y);
