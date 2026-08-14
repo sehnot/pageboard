@@ -52,9 +52,14 @@ jobs:
           git push
 
   # Unsigned dev builds as a downloadable workflow artifact — separate from
-  # release.yml (tag-triggered, signed, publishes to GitHub Releases).
+  # release.yml (tag-triggered, signed, publishes to GitHub Releases). Dev
+  # only, not main: a main push is normally immediately followed by a `v*`
+  # tag push, which triggers release.yml's own build of the same commit —
+  # running this job there too would just be a redundant, unsigned rebuild
+  # of what release.yml is about to build anyway.
   build:
     needs: test
+    if: github.ref == 'refs/heads/dev'
     strategy:
       fail-fast: false
       matrix:
