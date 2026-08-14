@@ -75,7 +75,14 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
-      - run: ${{ matrix.build_cmd }}
+      # electron-builder implicitly tries to publish to GitHub Releases
+      # whenever it detects a CI environment, even without --publish being
+      # passed (a behavior it's deprecating in v27, but still defaults to
+      # here) — this job has no GH_TOKEN (deliberately: it only produces a
+      # downloadable workflow artifact, publishing is release.yml's job on
+      # a tag push), so that implicit publish attempt fails the build.
+      # --publish never turns it off explicitly.
+      - run: ${{ matrix.build_cmd }} -- --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: pageboard-${{ matrix.os }}
