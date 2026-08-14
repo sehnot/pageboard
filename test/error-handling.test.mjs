@@ -284,9 +284,16 @@ test(
 
     await fs.chmod(lockedDir, 0o555); // read+execute, no write — locks after the copy/open above
 
+    // Matched by exact filePath, not displayName: fixtureA (same basename,
+    // different — unlocked — path) is already open in the shared store from
+    // an earlier test in this file ("mixed open operation"), so a
+    // displayName match could silently grab that wrong, unlocked document
+    // instead of this test's own scratch copy. That mismatch was invisible
+    // locally, where pdf-files/test-files/ also happens to be chmod 444 by
+    // hand, but surfaced for real on CI, where it isn't (see LESSONS.md).
     const outcome = await evaluate(`
       (async () => {
-        const doc = __mod.store.documents.find(d => d.displayName === 'pdflatex-4-pages.pdf');
+        const doc = __mod.store.documents.find(d => d.filePath === ${JSON.stringify(filePath)});
         __mod.applyPageAction('rotate-right', [doc.pages[0].id]); // forces dirty
         await __mod.saveDocuments([doc]);
         return { dirty: doc.dirty };
