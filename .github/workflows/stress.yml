@@ -1,0 +1,62 @@
+name: Stress
+
+# Runs the whole suite several times in a row on both OSes and fails if even a
+# single repetition disagrees with the others.
+#
+# This is the counterpart to CI deliberately having NO retry logic. A retry
+# would make a flaky test look green, which is exactly the property that made
+# past CI results untrustworthy: a red run stopped meaning "the app is broken".
+# Keeping CI strict only works if residual instability still gets found — just
+# on a schedule, and not in the middle of someone's pull request.
+#
+# Run it manually before a release, or let the weekly schedule catch drift.
+on:
+  workflow_dispatch:
+    inputs:
+      repetitions:
+        description: 'How many times to run the suite per OS'
+        required: false
+        default: '5'
+  schedule:
+    # Mondays, 04:17 UTC. Off the hour on purpose — scheduled jobs cluster on
+    # round times across all of GitHub, and a busy runner is precisely the
+    # condition this workflow is meant to probe.
+    - cron: '17 4 * * 1'
+
+jobs:
+  stress:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - name: Run the suite ${{ github.event.inputs.repetitions || 5 }} times
+        shell: bash
+        run: |
+          reps=${{ github.event.inputs.repetitions || 5 }}
+          failed=0
+          for i in $(seq 1 "$reps"); do
+            echo "::group::run $i of $reps"
+            if npm test; then
+              echo "run $i: pass"
+            else
+              echo "run $i: FAIL"
+              failed=$((failed + 1))
+            fi
+            echo "::endgroup::"
+          done
+          echo "--------------------------------------------"
+          echo "$((reps - failed))/$reps runs passed on ${{ matrix.os }}"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::$failed of $reps identical runs failed — the suite is not deterministic on ${{ matrix.os }}"
+            exit 1
+          fi

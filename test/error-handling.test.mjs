@@ -1,184 +1,41 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
-// The `electron` package's main entry, when required/imported from a plain
-// Node context (not Electron's own runtime), resolves to the absolute path
-// of the platform binary itself — Electron.app/.../Electron on macOS,
-// electron.exe on Windows, no .bin wrapper script or shell involved. Using
-// this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI:
-// spawning a .cmd file directly (without `shell: true`) fails with
-// `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
-// were a binary.
-import electronBinPath from 'electron';
+import { startSession, CDP_PORTS, projectRoot } from './helpers/cdp-session.mjs';
 
-// Error handling & robustness lives mostly in main.js (IPC,
-// filesystem) and renderer.js (pdf.js parsing, toast UI) — neither
-// importable under plain node:test (main.js needs real Electron,
-// renderer.js expects a browser context with window.api from the preload).
-// This test therefore launches the real app and drives it via the Chrome
-// DevTools Protocol — the same technique the fixes were originally verified
-// with manually, here turned into a permanent regression test.
+// Error handling & robustness lives mostly in main.js (IPC, filesystem) and
+// renderer.js (pdf.js parsing, toast UI) — neither importable under plain
+// node:test (main.js needs real Electron, renderer.js expects a browser
+// context with window.api from the preload). This test therefore launches the
+// real app and drives it via the Chrome DevTools Protocol — the same
+// technique the fixes were originally verified with manually, here turned
+// into a permanent regression test.
+//
+// All tests share one running app and store, so a document opened by an
+// earlier test is still around later — which is why every test that needs to
+// find "its" document looks it up by full filePath rather than by display
+// name (two different copies of a fixture can share a basename).
 
-const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const errorCasesDir = path.join(projectRoot, 'pdf-files', 'error-cases');
 const fixtureA = path.join(projectRoot, 'pdf-files', 'test-files', '004-pdflatex-4-pages', 'pdflatex-4-pages.pdf');
 const fixtureC = path.join(projectRoot, 'pdf-files', 'test-files', '027-cropped-rotated-scaled', 'cropped-rotated-scaled.pdf');
-const CDP_PORT = 9422;
 
-let electronProcess;
-let ws;
-let msgId = 0;
+let session;
 let tmpDir;
-let userDataDir;
-
-function send(method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const id = ++msgId;
-    const onMessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.id !== id) return;
-      ws.removeEventListener('message', onMessage);
-      clearTimeout(timer);
-      resolve(msg);
-    };
-    ws.addEventListener('message', onMessage);
-    ws.send(JSON.stringify({ id, method, params }));
-    // Cleared above on a normal response — otherwise this timer keeps
-    // Node's event loop alive until it fires, delaying process exit by up
-    // to its own delay even though the promise already settled.
-    const timer = setTimeout(() => reject(new Error(`CDP timeout on ${method}`)), 15000);
-  });
-}
-
-// Runs `expression` in the renderer and returns the value (structured via
-// JSON, see returnByValue) — throws if the evaluation itself threw a JS
-// exception, so a test failure doesn't silently slip through as `undefined`
-// (CDP's Runtime.evaluate response nests exceptionDetails oddly enough that
-// it must always be checked explicitly).
-async function evaluate(expression) {
-  const msg = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-  if (msg.result.exceptionDetails) {
-    throw new Error(`Renderer exception: ${JSON.stringify(msg.result.exceptionDetails)}`);
-  }
-  return msg.result.result?.value;
-}
-
-async function waitForDebuggerUrl(timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json`);
-      const targets = await res.json();
-      const page = targets.find((t) => t.type === 'page');
-      if (page) return page.webSocketDebuggerUrl;
-    } catch {
-      // Server not ready yet — keep polling.
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error('Electron window did not register for CDP in time');
-}
-
-// The CDP target (and a successful Runtime.enable) can exist before
-// index.html has actually finished its own initial navigation — a relative
-// `import('./renderer.js')` attempted in that window briefly fails with
-// "Failed to resolve module specifier" (observed on a real windows-latest
-// CI run). Retry instead of treating one early attempt as authoritative.
-async function importRendererModule(timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      await evaluate(`(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
-      return;
-    } catch (err) {
-      lastError = err;
-      await new Promise((r) => setTimeout(r, 200));
-    }
-  }
-  throw lastError;
-}
-
-// `node_modules/.bin/electron` is itself a Node wrapper script that spawns
-// the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it — a plain `child.kill()` on
-// that wrapper doesn't reliably take the real Electron process (and its own
-// Renderer/GPU/Utility helper processes) down with it, especially under
-// SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned
-// processes keep squatting on this file's CDP port, so a later test run's
-// `waitForDebuggerUrl()` can attach to a stale, already-exited-code Electron
-// window instead of spawning a fresh one. Spawning with `detached: true`
-// puts the whole tree in its own POSIX process group; killing the NEGATIVE
-// pid (`-child.pid`) sends the signal to every process in that group at
-// once. Falls back to a plain kill if that's unavailable (e.g. Windows,
-// where process groups work differently) or the process already exited.
-function killElectron(child) {
-  if (!child) return;
-  try {
-    process.kill(-child.pid, 'SIGKILL');
-  } catch {
-    child.kill('SIGKILL');
-  }
-}
 
 before(async () => {
-  // Explicitly remove ELECTRON_RUN_AS_NODE instead of just trusting the
-  // ambient environment — if the variable is set in the calling shell (e.g.
-  // a VS Code integrated terminal), Electron would
-  // otherwise start as a plain Node process with no window/ipcMain and
-  // never load the app logic.
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-
-  // A scratch --user-data-dir isolates this run's settings.json from the
-  // real profile (and from other CDP test files' Electron instances, which
-  // node:test can run concurrently — sharing the default profile would let
-  // them race on the same settings.json).
-  userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-error-cases-userdata-'));
-  electronProcess = spawn(
-    electronBinPath,
-    ['.', `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${userDataDir}`],
-    // `detached: true` puts this whole process tree in its own process
-    // group — see the comment on killElectron() below for why that matters.
-    { cwd: projectRoot, env, stdio: 'ignore', detached: true },
-  );
-
-  const wsUrl = await waitForDebuggerUrl(20000);
-  ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, { once: true });
-    ws.addEventListener('error', reject, { once: true });
-  });
-  await send('Runtime.enable');
-
-  // renderer.js re-exports store/handleOpenedFiles/saveDocuments etc.
-  // specifically for test sessions like this — import it
-  // once here and anchor it on the page's globalThis, so all tests in this
-  // file share the same running store (no Electron restart needed between
-  // individual test cases).
-  await importRendererModule();
-
-  // Force English regardless of the host OS's locale (the app now defaults
-  // to the OS-detected language, see src/i18n.mjs matchLocale() — without
-  // this, the toast/dialog assertions below would fail on any machine whose
-  // system language isn't English). Goes through the renderer's own
-  // switchLocale() (same function the Options dialog's language picker
-  // calls), not window.api.saveSettings() directly — the latter only
-  // updates main.js's own state, it doesn't tell the already-running
-  // renderer to re-point its own `t` binding.
-  await evaluate(`__mod.switchLocale('en'); true`);
-
+  // The harness forces English regardless of the host OS's locale (the app
+  // defaults to the OS-detected language, see src/i18n.mjs matchLocale()) —
+  // without that, the toast/dialog assertions below would fail on any machine
+  // whose system language isn't English.
+  session = await startSession({ name: 'error-cases', port: CDP_PORTS.errorHandling });
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-error-cases-'));
 });
 
 after(async () => {
-  ws?.close();
-  killElectron(electronProcess);
+  await session?.close();
   if (tmpDir) {
     // Reset chmod before cleanup — one test case deliberately makes the
     // directory read-only (no delete permission left), otherwise our own
@@ -189,10 +46,9 @@ after(async () => {
     }
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
-  if (userDataDir) {
-    await fs.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
-  }
 });
+
+const evaluate = (expression) => session.evaluate(expression);
 
 async function readToast() {
   return evaluate(`
@@ -383,7 +239,8 @@ test(
       })()
     `);
 
-    await new Promise((r) => setTimeout(r, 300));
+    await session.waitFor(`!!document.querySelector('.modal-overlay select')`,
+      { message: 'the empty-documents dialog never appeared' });
 
     const outcome = await evaluate(`
       (async () => {
@@ -435,7 +292,8 @@ test('emptying a document and choosing "Restore original" on save brings its pag
       return true;
     })()
   `);
-  await new Promise((r) => setTimeout(r, 300));
+  await session.waitFor(`!!document.querySelector('.modal-overlay select')`,
+    { message: 'the empty-documents dialog never appeared' });
 
   const outcome = await evaluate(`
     (async () => {

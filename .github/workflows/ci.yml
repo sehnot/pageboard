@@ -9,6 +9,16 @@ on:
   push:
     branches: [dev, main]
 
+# Superseded runs on the same branch are pointless once a newer commit exists,
+# and they actively hurt: three runs once started within the same second (a dev
+# push, a main push and a tag), putting five runners on one account in
+# parallel. The slowest test job ever recorded happened in exactly that
+# situation, and it is the one that flaked. Cancelling stale runs keeps
+# contention — and with it timing-sensitive failures — down.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -16,11 +26,17 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # The suite runs in well under 2 minutes; anything approaching this limit
+    # is hung, not slow. Without it a stuck Electron/CDP session would burn
+    # GitHub's 6-hour default before being killed, and `build` (needs: test)
+    # would wait behind it the whole time.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
       - run: npm ci
       - run: npm test
 
@@ -42,11 +58,13 @@ jobs:
           - os: windows-latest
             build_cmd: npm run build:win
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
       - run: npm ci
       # electron-builder implicitly tries to publish to GitHub Releases
       # whenever it detects a CI environment, even without --publish being

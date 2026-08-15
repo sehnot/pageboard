@@ -1,141 +1,52 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import fs from 'node:fs/promises';
-import os from 'node:os';
-// The `electron` package's main entry, when required/imported from a plain
-// Node context (not Electron's own runtime), resolves to the absolute path
-// of the platform binary itself — Electron.app/.../Electron on macOS,
-// electron.exe on Windows, no .bin wrapper script or shell involved. Using
-// this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI:
-// spawning a .cmd file directly (without `shell: true`) fails with
-// `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
-// were a binary.
-import electronBinPath from 'electron';
+import { startSession, CDP_PORTS, testFilesDir } from './helpers/cdp-session.mjs';
 
-// Covers real UI-level interaction paths that were previously only
-// exercised at the model/store level (bypassing the actual DOM): page
-// selection via real clicks, keyboard shortcuts via real KeyboardEvents,
-// toolbar action buttons via real .click(), and closeDocument()'s
-// dialog-free (non-dirty) branch — all of it automatable; this file is the
-// coverage that was missing. closeDocument()'s dirty branch is deliberately
-// NOT covered — see the comment above that test further down.
+// Covers the interaction layer that can be driven for real: page selection
+// via actual mouse clicks (including modifiers), keyboard shortcuts, the
+// toolbar action buttons, and closeDocument()'s dialog-free (non-dirty)
+// branch.
+//
+// The tests in this file deliberately share one running app and build on each
+// other's state (later tests rely on earlier ones having left something to
+// undo), so unlike the other CDP files there is no per-test reset here. What
+// each test does guarantee for itself is its own precondition — see
+// clickPage() below.
 
-const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const testFilesDir = path.join(projectRoot, 'pdf-files', 'test-files');
-// A separate port from the other CDP test files (9422-9428).
-const CDP_PORT = 9429;
+let session;
 
-let electronProcess;
-let ws;
-let msgId = 0;
-let userDataDir;
+before(async () => {
+  session = await startSession({ name: 'interaction', port: CDP_PORTS.interaction });
+  await session.openFiles([
+    path.join(testFilesDir, '004-pdflatex-4-pages', 'pdflatex-4-pages.pdf'),
+    path.join(testFilesDir, '027-cropped-rotated-scaled', 'cropped-rotated-scaled.pdf'),
+  ]);
+});
 
-function send(method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const id = ++msgId;
-    const onMessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.id !== id) return;
-      ws.removeEventListener('message', onMessage);
-      clearTimeout(timer);
-      resolve(msg);
-    };
-    ws.addEventListener('message', onMessage);
-    ws.send(JSON.stringify({ id, method, params }));
-    const timer = setTimeout(() => reject(new Error(`CDP timeout on ${method}`)), 15000);
-  });
-}
+after(async () => {
+  await session?.close();
+});
 
-async function evaluate(expression) {
-  const msg = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-  if (msg.result.exceptionDetails) {
-    throw new Error(`Renderer exception: ${JSON.stringify(msg.result.exceptionDetails)}`);
-  }
-  return msg.result.result?.value;
-}
-
-async function waitForDebuggerUrl(timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json`);
-      const targets = await res.json();
-      const page = targets.find((t) => t.type === 'page');
-      if (page) return page.webSocketDebuggerUrl;
-    } catch {
-      // Server not ready yet — keep polling.
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error('Electron window did not register for CDP in time');
-}
-
-// The CDP target (and a successful Runtime.enable) can exist before
-// index.html has actually finished its own initial navigation — a relative
-// `import('./renderer.js')` attempted in that window briefly fails with
-// "Failed to resolve module specifier" (observed on a real windows-latest
-// CI run). Retry instead of treating one early attempt as authoritative.
-async function importRendererModule(timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      await evaluate(`(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
-      return;
-    } catch (err) {
-      lastError = err;
-      await new Promise((r) => setTimeout(r, 200));
-    }
-  }
-  throw lastError;
-}
-
-// node_modules/.bin/electron is itself a wrapper that
-// spawns the real Electron binary as a separate child process; a plain
-// .kill() doesn't reliably take the whole tree down with it.
-function killElectron(child) {
-  if (!child) return;
-  try {
-    process.kill(-child.pid, 'SIGKILL');
-  } catch {
-    child.kill('SIGKILL');
-  }
-}
-
-// Real mouse clicks (unlike wheel events, which reliably hang over CDP)
-// work reliably via the CDP Input domain.
-async function clickAt(x, y, { modifiers = 0 } = {}) {
-  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1, modifiers });
-  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, modifiers });
-}
+const evaluate = (expression) => session.evaluate(expression);
 
 // CDP Input modifier bitmask: Alt=1, Ctrl=2, Meta/Cmd=4, Shift=8.
 // `toggle` deliberately uses Meta (Cmd) on macOS rather than Ctrl: holding
 // Ctrl during a mousedown/mouseup on macOS is that OS's native
 // secondary-click (right-click) convention, and Chromium honors it by not
 // synthesizing a 'click' DOM event at all (mousedown/mouseup still fire,
-// confirmed via a standalone diagnostic) — so a
-// CDP-dispatched Ctrl+click never reaches handlePageClick() on this
-// platform, even though the app's own handler checks
-// `event.metaKey || event.ctrlKey` and Ctrl+click is the correct modifier
-// on Windows/Linux.
+// confirmed via a standalone diagnostic) — so a CDP-dispatched Ctrl+click
+// never reaches handlePageClick() on this platform, even though the app's own
+// handler checks `event.metaKey || event.ctrlKey` and Ctrl+click is the
+// correct modifier on Windows/Linux.
 const MOD = { shift: 8, toggle: process.platform === 'darwin' ? 4 : 2 };
 
-function centerOf(rect) {
-  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-}
-
-// Constructing and dispatching a real KeyboardEvent directly in the
-// renderer (same technique focus-mode.test.mjs uses for WheelEvent) rather
-// than CDP's Input.dispatchKeyEvent — simpler to get modifier keys exactly
-// right, and avoids relying on a CDP input path this project hasn't
-// already verified for keyboard (only clicks are confirmed reliable).
-// Exercises the exact same `window.addEventListener('keydown',
-// ...)` listener a real key press would.
+// Constructing and dispatching a real KeyboardEvent directly in the renderer
+// (same technique focus-mode.test.mjs uses for WheelEvent) rather than CDP's
+// Input.dispatchKeyEvent — simpler to get modifier keys exactly right, and
+// avoids relying on a CDP input path this project hasn't already verified for
+// keyboard (only clicks are confirmed reliable). Exercises the exact same
+// `window.addEventListener('keydown', ...)` listener a real key press would.
 async function pressKey(key, { ctrlKey = false, shiftKey = false } = {}) {
   await evaluate(`
     (() => {
@@ -147,84 +58,86 @@ async function pressKey(key, { ctrlKey = false, shiftKey = false } = {}) {
   `);
 }
 
-// Every page's id currently in the active (Canvas) view, in DOM order —
-// which matches getFlatPages()' document-then-page order in renderer.js, so
-// index N here corresponds to the Nth page across all open documents.
-// Deliberately doesn't capture rects up front: a document column can be
-// taller than the Electron window (800px tall by default), so a slot's
-// getBoundingClientRect() computed once
-// here can point outside the actually-visible viewport, and a CDP-
-// synthesized click at that stale coordinate silently hits nothing. See
-// clickPage() below, which re-measures only after scrolling into view.
+// Every page's id currently in the active (Canvas) view, in DOM order — which
+// matches getFlatPages()' document-then-page order in renderer.js, so index N
+// here corresponds to the Nth page across all open documents.
 async function flatPageIds() {
   return evaluate(`
     [...document.querySelectorAll('#canvas-view .page-slot[data-page-id]')].map((el) => el.dataset.pageId)
   `);
 }
 
-// Scrolls the target page's slot into view, then clicks its *current*
-// on-screen center — see the note on flatPageIds() above for why a rect
-// can't just be looked up once ahead of time.
+async function selectedPageIds() {
+  return evaluate(`
+    [...document.querySelectorAll('#canvas-view .page-slot.selected[data-page-id]')].map((el) => el.dataset.pageId)
+  `);
+}
+
+// Clicks a page and does not return until the click has actually taken
+// effect.
+//
+// Three things make this reliable, all of which were previously missing:
+//  - it waits for the view to stop re-rasterizing first, because a canvas
+//    swapped out mid-click makes the browser drop the event entirely;
+//  - scroll, measure and hit-test happen in ONE evaluate, so the coordinate
+//    can't go stale in a round-trip gap (a document column can be taller than
+//    the window, so the rect genuinely does move when scrolled);
+//  - it verifies the selection actually changed afterwards.
+//
+// That last point is what turns a missed click into an immediate, explicit
+// failure instead of a puzzling assertion three lines later. The one open
+// CI flake this file had ("the Delete key removes the selected page(s)",
+// failing with `4 !== 3`) was exactly that: the click that was supposed to
+// select a page landed nowhere, so Delete had nothing to act on and the test
+// blamed the delete logic.
 async function clickPage(pageId, { modifiers = 0 } = {}) {
-  const rect = await evaluate(`
+  await session.waitForIdle();
+  const selector = `#canvas-view .page-slot[data-page-id="${pageId}"]`;
+  const before = await selectedPageIds();
+
+  const target = await evaluate(`
     (() => {
-      const el = document.querySelector('#canvas-view .page-slot[data-page-id="${pageId}"]');
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return { error: 'no such page slot' };
       el.scrollIntoView({ block: 'center', inline: 'center' });
       const r = el.getBoundingClientRect();
-      return { left: r.left, top: r.top, width: r.width, height: r.height };
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      return {
+        x, y,
+        onTarget: !!hit && hit.closest('.page-slot') === el,
+        inViewport: r.top >= 0 && r.left >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth,
+      };
     })()
   `);
-  const { x, y } = centerOf(rect);
-  await clickAt(x, y, { modifiers });
-}
+  assert.ok(!target.error, `clickPage(${pageId}): ${target.error}`);
+  assert.ok(target.inViewport, `clickPage(${pageId}): slot is not fully inside the viewport after scrolling`);
+  assert.ok(target.onTarget, `clickPage(${pageId}): another element covers the slot's centre`);
 
-async function selectedPageIds() {
-  return evaluate(`[...document.querySelectorAll('.page-slot.selected')].map((el) => el.dataset.pageId)`);
-}
+  // Press and release are queued together rather than awaited one after the
+  // other: a full CDP round trip between them lets a re-render slip in, and
+  // the browser only reports a click when mousedown and mouseup share a
+  // target element.
+  const base = { x: target.x, y: target.y, button: 'left', clickCount: 1, modifiers };
+  await Promise.all([
+    session.send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }),
+    session.send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' }),
+  ]);
 
-before(async () => {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-
-  userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-interaction-userdata-'));
-  electronProcess = spawn(
-    electronBinPath,
-    ['.', `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${userDataDir}`],
-    { cwd: projectRoot, env, stdio: 'ignore', detached: true },
+  // What the click should have done to THIS page: a toggle-modifier click
+  // flips it, every other click selects it. (Checking "the selection changed"
+  // instead would be wrong — clicking the already-and-only-selected page is a
+  // legitimate no-op.)
+  const shouldEndUpSelected = modifiers === MOD.toggle ? !before.includes(pageId) : true;
+  await session.waitFor(
+    `document.querySelector(${JSON.stringify(selector)})?.classList.contains('selected') === ${shouldEndUpSelected}`,
+    {
+      message: `click on page ${pageId} did not leave it ${shouldEndUpSelected ? 'selected' : 'deselected'}`
+        + ` (selection before the click: ${JSON.stringify(before)})`,
+    },
   );
-
-  const wsUrl = await waitForDebuggerUrl(20000);
-  ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, { once: true });
-    ws.addEventListener('error', reject, { once: true });
-  });
-  await send('Runtime.enable');
-
-  await importRendererModule();
-  await evaluate(`__mod.switchLocale('en'); true`);
-
-  const filePaths = [
-    path.join(testFilesDir, '004-pdflatex-4-pages', 'pdflatex-4-pages.pdf'),
-    path.join(testFilesDir, '027-cropped-rotated-scaled', 'cropped-rotated-scaled.pdf'),
-  ];
-  await evaluate(`
-    (async () => {
-      const fileInfos = await window.api.readPdfFiles(${JSON.stringify(filePaths)});
-      await __mod.handleOpenedFiles(fileInfos);
-      return true;
-    })()
-  `);
-  await new Promise((r) => setTimeout(r, 800));
-});
-
-after(async () => {
-  ws?.close();
-  killElectron(electronProcess);
-  if (userDataDir) {
-    await fs.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
-  }
-});
+}
 
 test('toolbar action buttons start disabled with no selection', async () => {
   // Must run before any other test in this file selects something — there's
