@@ -555,19 +555,37 @@ ipcMain.handle('get-settings', () => enrichedSettings());
 // full settings object — simpler for the renderer, which then doesn't need
 // to know or reconstruct the whole settings shape for a single-field change
 // (matches the live-autosave-per-control design of the Options dialog).
-ipcMain.handle('save-settings', async (event, patch) => {
-  const { mergeSettings } = await settingsModule;
-  settingsCache = mergeSettings(settingsCache, patch);
-  await writeSettingsFile();
-  // Locale also drives native chrome (menu/context menus/close dialog, see
-  // buildMenu() and the `t()` calls throughout this file) — a settings-only
-  // update wouldn't be enough, the static app menu needs an explicit rebuild
-  // to pick up the new strings without an app restart.
-  if (patch.locale) {
-    await refreshTranslator(settingsCache.locale);
-    buildMenu();
-  }
-  return enrichedSettings();
+//
+// Queued rather than handled inline: switchLocale() in renderer.js
+// deliberately fires its own save-settings call without awaiting it (for UI
+// responsiveness — see the comment there), so a second save-settings call
+// (e.g. from an Options-dialog control) can arrive while the first is still
+// in flight. Two concurrent invocations of this handler would both read the
+// same settingsCache, merge their own patch onto it independently, and then
+// both call writeSettingsFile() — two overlapping fs.writeFile calls to the
+// same path, which can interleave at the OS level and leave settings.json
+// with trailing garbage from whichever write was longer (observed as a real
+// "Unexpected non-whitespace character after JSON" parse failure on a
+// windows-latest CI run). Chaining every call onto settingsWriteQueue
+// serializes the whole merge-then-write cycle, so a later patch always
+// merges onto the result of the previous write instead of racing it.
+let settingsWriteQueue = Promise.resolve();
+ipcMain.handle('save-settings', (event, patch) => {
+  settingsWriteQueue = settingsWriteQueue.catch(() => {}).then(async () => {
+    const { mergeSettings } = await settingsModule;
+    settingsCache = mergeSettings(settingsCache, patch);
+    await writeSettingsFile();
+    // Locale also drives native chrome (menu/context menus/close dialog,
+    // see buildMenu() and the `t()` calls throughout this file) — a
+    // settings-only update wouldn't be enough, the static app menu needs an
+    // explicit rebuild to pick up the new strings without an app restart.
+    if (patch.locale) {
+      await refreshTranslator(settingsCache.locale);
+      buildMenu();
+    }
+    return enrichedSettings();
+  });
+  return settingsWriteQueue;
 });
 
 // Both real callers (the "View on GitHub" link and the Acknowledgments
