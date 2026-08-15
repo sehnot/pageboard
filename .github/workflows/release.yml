@@ -15,6 +15,14 @@ on:
     tags:
       - 'v*'
 
+# The repo's default GITHUB_TOKEN permission is read-only (Settings ->
+# Actions -> General -> Workflow permissions) — electron-builder --publish
+# always needs write access to actually create the GitHub Release and
+# upload assets to it, same class of issue ci.yml already hit once for its
+# own (since-disabled) implicit publish attempt.
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
