@@ -17,8 +17,9 @@ see the [project README](../README.md) instead.
 
 ## Contents
 
-- **[Getting Started](getting-started.md)** — opening PDFs, the empty
-  starting state, what happens when you open a file that's already open.
+- **[Getting Started](getting-started.md)** — clearing your OS's security
+  warning on a downloaded build, opening PDFs, the empty starting state,
+  what happens when you open a file that's already open.
 - **[View Modes](view-modes.md)** — Canvas mode vs. Grid view, zooming and
   panning, focus mode.
 - **[Organizing Pages](organizing-pages.md)** — selecting pages, drag &
