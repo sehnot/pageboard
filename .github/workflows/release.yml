@@ -27,6 +27,7 @@ jobs:
   build:
     strategy:
       fail-fast: false
+      max-parallel: 1 # sequential, not parallel — see the comment below
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -39,6 +40,14 @@ jobs:
 
       - run: npm ci
 
+      # electron-builder creates the GitHub Release for this tag if it
+      # doesn't see one yet, then uploads its own platform assets to it.
+      # Running both matrix jobs in parallel raced: neither saw the
+      # other's not-yet-created release, so each created its own separate
+      # (broken, mistagged) draft — found for real on the v1.0.0 release
+      # (see LESSONS.md). max-parallel: 1 above forces them sequential:
+      # whichever runs first creates the real release, the second finds
+      # it and adds to it.
       - name: Build & publish
         run: npx electron-builder --publish always
         env:
