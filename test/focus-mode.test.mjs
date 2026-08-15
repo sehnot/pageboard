@@ -80,6 +80,27 @@ async function settledRectOf(selector) {
   `);
 }
 
+// Horizontal centre of the scroll container's CONTENT area, which is what the
+// focused page is actually centred within — deliberately not the window's
+// centre.
+//
+// `clientWidth` excludes a scrollbar; `innerWidth` does not. Where scrollbars
+// take up layout space (Windows always, and the macOS CI runners too) the two
+// differ by the scrollbar's width, so comparing against the window centre is
+// off by half of it. That is precisely what happened: the assertion passed
+// locally (macOS overlay scrollbars, centre exactly 500) and failed on both CI
+// runners with 492.5 — identically, i.e. a real environment difference rather
+// than flakiness. Measuring against the container makes the check
+// scrollbar-independent, so the tolerance can stay tight everywhere.
+function contentCentreX(view) {
+  return session.evaluate(`
+    (() => {
+      const el = document.getElementById('${view}-view');
+      return el.getBoundingClientRect().left + el.clientWidth / 2;
+    })()
+  `);
+}
+
 function centerOf(rect) {
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
 }
@@ -177,9 +198,10 @@ test('double-click in Canvas mode enlarges the page to fill the frame and center
     `page should be noticeably taller in focus mode (before ${before.height}, after ${focused.height})`,
   );
 
+  const canvasCentre = await contentCentreX('canvas');
   assert.ok(
-    Math.abs(centerOf(focused).x - VIEWPORT.width / 2) < 5,
-    `page should be centered horizontally (center at ${centerOf(focused).x}, expected ${VIEWPORT.width / 2})`,
+    Math.abs(centerOf(focused).x - canvasCentre) < 5,
+    `page should be centered horizontally (center at ${centerOf(focused).x}, expected ${canvasCentre})`,
   );
 
   // Other documents are no longer visible in the meantime (rest of the canvas
@@ -199,9 +221,10 @@ test('double-click in Grid also centers the page (regression test: used to be le
 
   // The bug this guards against left the page in column 1 of a still-N-columns
   // wide grid, i.e. far left rather than centered.
+  const gridCentre = await contentCentreX('grid');
   assert.ok(
-    Math.abs(centerOf(focused).x - VIEWPORT.width / 2) < 5,
-    `grid page should be centered horizontally, not left-aligned (center at ${centerOf(focused).x}, expected ${VIEWPORT.width / 2})`,
+    Math.abs(centerOf(focused).x - gridCentre) < 5,
+    `grid page should be centered horizontally, not left-aligned (center at ${centerOf(focused).x}, expected ${gridCentre})`,
   );
   assert.ok(
     Math.abs(focused.height - EXPECTED_FOCUSED_HEIGHT) < EXPECTED_FOCUSED_HEIGHT * 0.02,
