@@ -1,23 +1,37 @@
 # PageBoard
 
-Local desktop app (Mac & Windows) for **organizing multiple PDF files at
-once**: reorder, delete, rotate, duplicate, and merge pages — across
-documents on a shared canvas, as if all open PDFs were one single large
-document. No editing of content/forms/annotations, purely focused on page
-structure.
+Open a stack of PDFs, throw all their pages onto one shared canvas, and
+reorganize them like they were always a single document — drag pages
+between files, reorder, rotate, duplicate, delete, split, merge. Then save,
+and every file is exactly what you left it as. No uploads, no accounts, no
+watermarks: PageBoard runs entirely on your own machine.
 
-## Who is this for?
+It's free, open source, and built for the moment your PDF workflow stops
+being about *one* file and starts being about *all of them at once* —
+scanned chapters that need reordering, invoices that need splitting apart,
+forms that need to be assembled from three different sources. PageBoard
+turns that into drag & drop.
 
-Single-document editing (rotate/delete pages, export from one PDF) is
-already covered by PDF24, iLovePDF, Smallpdf, Acrobat, or Preview.app — you
-don't need this tool for that. The difference is **seamless
-multi-document editing**: several PDFs land together on one canvas and can
-be reorganized against each other via drag & drop, as if they were one
-single large document — pages stop "knowing" their original document
-boundary once they're open. Built for people who regularly need to
-sort/assemble several PDFs at once (e.g. scanned chapters, invoices, forms
-from different sources) and don't want to upload each file separately to a
-web tool — local, free, identical behavior on Mac and Windows.
+## Why you'll like it
+
+- **One canvas for every open PDF.** Documents sit side by side and pages
+  move freely between them — drag a page out of one file and into another,
+  drop it at the edge to spin off a brand-new document, select pages across
+  file boundaries and act on all of them together.
+- **Two views, one workflow.** Canvas mode keeps each document as its own
+  column for spatial, per-file work; Grid view flattens everything into one
+  tile wall when you just want to scan every page at once. Switch anytime
+  without losing your place.
+- **Fast even when your PDFs aren't small.** Pages only render once they're
+  actually about to be visible, so opening a dozen large scans stays
+  smooth instead of freezing the window.
+- **Nothing leaves your computer.** No cloud processing, no upload step —
+  PageBoard reads and writes the files already on your disk, and only the
+  files you touch.
+- **Undo, always.** Every page operation and every drag is undoable for the
+  whole session, so exploring an idea never risks the original.
+- **Looks and behaves the same everywhere.** Mac and Windows get pixel-
+  identical rendering, since the whole UI runs on the same engine on both.
 
 ## Screenshots
 
@@ -39,8 +53,6 @@ User documentation (how to actually use the app) lives in
 - [Keyboard Shortcuts](docs/keyboard-shortcuts.md)
 
 ## Feature set
-
-All 18 phases of the internal implementation plan are complete:
 
 - **Open**: multi-select file dialog, drag & drop from Finder/Explorer,
   detection of already-open files
@@ -67,9 +79,11 @@ All 18 phases of the internal implementation plan are complete:
 - Packaged `.dmg`/`.exe` builds via `electron-builder`, optional
   auto-update via GitHub Releases
 
-## Development
+## Build it yourself
 
-Requires **Node.js 22 or newer** (only for `npm install`/development
+There's no packaged download yet, but getting a running app out of this
+repo takes a couple of minutes. Requires **Node.js 22 or newer** (only for
+`npm install`/development
 tooling — the packaged app bundles its own Electron/Node runtime, so an
 end user never needs Node installed at all).
 

@@ -1,7 +1,6 @@
 // Regenerates docs/screenshots/canvas-view.png and grid-view.png by
-// actually driving the real app — same CDP technique documented in
-// CLAUDE.md ("Headless UI verification") and used by the CDP-driven tests
-// under test/. Deliberately file-name-agnostic about what's inside
+// actually driving the real app — same CDP technique used by the
+// CDP-driven tests under test/. Deliberately file-name-agnostic about what's inside
 // pdf-files/screenshot-files/ (see that directory's README.md) — swapping
 // in nicer PDFs later needs no change here.
 import { spawn } from 'node:child_process';
@@ -14,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
@@ -60,9 +59,8 @@ async function evaluate(ws, expression) {
 // never gets real OS focus, and Chromium silently pauses
 // IntersectionObserver callbacks for an unfocused/occluded window — normal
 // scroll-triggered rendering would just never happen here, regardless of
-// how long this script waits (see CLAUDE.md, "Environment gotchas" /
-// LESSONS.md; renderer.js exports renderPageIntoSlot specifically for this
-// bypass).
+// how long this script waits; renderer.js exports renderPageIntoSlot
+// specifically for this bypass.
 async function forceRenderAllSlots(ws) {
   await evaluate(
     ws,
@@ -90,7 +88,7 @@ async function waitForDebuggerUrl(timeoutMs) {
 
 // `node_modules/.bin/electron` is itself a Node wrapper script that spawns
 // the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it (see LESSONS.md) — a plain `child.kill()` on
+// termination signals to it — a plain `child.kill()` on
 // that wrapper doesn't reliably take the real Electron process (and its own
 // Renderer/GPU/Utility helper processes) down with it, especially under
 // SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned

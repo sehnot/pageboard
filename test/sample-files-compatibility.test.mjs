@@ -10,7 +10,7 @@ import os from 'node:os';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
@@ -91,9 +91,29 @@ async function waitForDebuggerUrl(timeoutMs) {
   throw new Error('Electron window did not register for CDP in time');
 }
 
+// The CDP target (and a successful Runtime.enable) can exist before
+// index.html has actually finished its own initial navigation — a relative
+// `import('./renderer.js')` attempted in that window briefly fails with
+// "Failed to resolve module specifier" (observed on a real windows-latest
+// CI run). Retry instead of treating one early attempt as authoritative.
+async function importRendererModule(timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      await evaluate(`(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
+      return;
+    } catch (err) {
+      lastError = err;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  throw lastError;
+}
+
 // `node_modules/.bin/electron` is itself a Node wrapper script that spawns
 // the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it (see LESSONS.md) — a plain `child.kill()` on
+// termination signals to it — a plain `child.kill()` on
 // that wrapper doesn't reliably take the real Electron process (and its own
 // Renderer/GPU/Utility helper processes) down with it, especially under
 // SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned
@@ -147,12 +167,7 @@ before(async () => {
   });
   await send('Runtime.enable');
 
-  await evaluate(`
-    (async () => {
-      globalThis.__mod = await import('./renderer.js');
-      return true;
-    })()
-  `);
+  await importRendererModule();
 });
 
 after(async () => {

@@ -10,7 +10,7 @@ let nextSourceId = 1;
  * pdf-lib is deliberately kept out of this browser-side model: its ESM
  * build pulls in bare-specifier dependencies (pako, @pdf-lib/fontkit, …)
  * and even a Node `fs` import, none of which resolve in an Electron
- * renderer without a bundler — see LESSONS.md. pdf-lib is used exclusively
+ * renderer without a bundler. pdf-lib is used exclusively
  * in the main process, where Node module resolution is available, for the
  * actual write/save operations added in later phases.
  */

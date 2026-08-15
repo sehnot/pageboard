@@ -10,21 +10,20 @@ import os from 'node:os';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
 import electronBinPath from 'electron';
 
-// Covers "does a setting actually survive an app restart", which
-// TESTING.md previously lumped in with the genuinely-manual OS-locale/
-// network-dependent items — it doesn't belong there: whether
+// Covers "does a setting actually survive an app restart", which the
+// manual test checklist previously lumped in with the genuinely-manual
+// OS-locale/network-dependent items — it doesn't belong there: whether
 // settings.json is read correctly on a fresh launch depends on nothing
 // but this app's own code and a real second Electron process against the
-// same --user-data-dir, both fully controllable here. See LESSONS.md/
-// CLAUDE.md for why every CDP test file needs its own port and why
-// process cleanup uses killElectron() (detached process group) rather
-// than a plain .kill().
+// same --user-data-dir, both fully controllable here. Every CDP test file
+// needs its own port, and process cleanup uses killElectron() (detached
+// process group) rather than a plain .kill().
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 // A separate port from the other CDP test files (9422-9426) — node:test
@@ -75,7 +74,27 @@ async function waitForDebuggerUrl(timeoutMs) {
   throw new Error('Electron window did not register for CDP in time');
 }
 
-// See LESSONS.md — node_modules/.bin/electron is itself a wrapper that
+// The CDP target (and a successful Runtime.enable) can exist before
+// index.html has actually finished its own initial navigation — a relative
+// `import('./renderer.js')` attempted in that window briefly fails with
+// "Failed to resolve module specifier" (observed on a real windows-latest
+// CI run). Retry instead of treating one early attempt as authoritative.
+async function importRendererModule(ws, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      await evaluate(ws, `(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
+      return;
+    } catch (err) {
+      lastError = err;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  throw lastError;
+}
+
+// node_modules/.bin/electron is itself a wrapper that
 // spawns the real Electron binary as a separate child process; a plain
 // .kill() doesn't reliably take the whole tree down with it.
 function killElectron(child) {
@@ -104,7 +123,7 @@ async function launchPageBoard() {
     ws.addEventListener('error', reject, { once: true });
   });
   await send(ws, 'Runtime.enable');
-  await evaluate(ws, `(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
+  await importRendererModule(ws);
 
   return { electronProcess, ws };
 }
@@ -128,9 +147,11 @@ after(async () => {
 test('locale, default view, and default grid-columns survive a full app restart', async () => {
   userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-settings-persist-userdata-'));
 
-  // First launch: force English deterministically (see LESSONS.md for why
-  // this goes through switchLocale(), not window.api.saveSettings()
-  // directly), then change every persisted setting this test cares about.
+  // First launch: force English deterministically (this goes through
+  // switchLocale(), not window.api.saveSettings() directly, since the
+  // latter only updates main.js's own state, not the already-running
+  // renderer's `t` binding), then change every persisted setting this test
+  // cares about.
   activeSession = await launchPageBoard();
   await evaluate(activeSession.ws, `__mod.switchLocale('en'); true`);
   await evaluate(
