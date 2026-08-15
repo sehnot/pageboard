@@ -1,169 +1,47 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import os from 'node:os';
-// The `electron` package's main entry, when required/imported from a plain
-// Node context (not Electron's own runtime), resolves to the absolute path
-// of the platform binary itself — Electron.app/.../Electron on macOS,
-// electron.exe on Windows, no .bin wrapper script or shell involved. Using
-// this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI:
-// spawning a .cmd file directly (without `shell: true`) fails with
-// `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
-// were a binary.
-import electronBinPath from 'electron';
+import { startSession, CDP_PORTS } from './helpers/cdp-session.mjs';
 
 // Covers the Options dialog (i18n, default view/grid-columns settings,
-// auto-update toggle) end to end via the same CDP technique as
-// error-handling.test.mjs/focus-mode.test.mjs. What's deliberately NOT
-// checked here: real OS-locale detection (machine-dependent) and actual
-// network-backed auto-update outcomes against real GitHub Releases
-// (existing manual-testing caveat).
+// auto-update toggle) end to end. What's deliberately NOT checked here: real
+// OS-locale detection (machine-dependent) and actual network-backed
+// auto-update outcomes against real GitHub Releases (existing manual-testing
+// caveat).
 
-const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-// A separate port from the other CDP test files (9422/9423/9424) — node:test
-// can run multiple test files concurrently, each with its own Electron
-// process, so a shared port would collide.
-const CDP_PORT = 9425;
-
-let electronProcess;
-let ws;
-let msgId = 0;
-let userDataDir;
-
-function send(method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const id = ++msgId;
-    const onMessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.id !== id) return;
-      ws.removeEventListener('message', onMessage);
-      clearTimeout(timer);
-      resolve(msg);
-    };
-    ws.addEventListener('message', onMessage);
-    ws.send(JSON.stringify({ id, method, params }));
-    // Cleared above on a normal response — otherwise this timer keeps
-    // Node's event loop alive until it fires, delaying process exit by up
-    // to its own delay even though the promise already settled.
-    const timer = setTimeout(() => reject(new Error(`CDP timeout on ${method}`)), 15000);
-  });
-}
-
-async function evaluate(expression) {
-  const msg = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-  if (msg.result.exceptionDetails) {
-    throw new Error(`Renderer exception: ${JSON.stringify(msg.result.exceptionDetails)}`);
-  }
-  return msg.result.result?.value;
-}
-
-async function waitForDebuggerUrl(timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json`);
-      const targets = await res.json();
-      const page = targets.find((t) => t.type === 'page');
-      if (page) return page.webSocketDebuggerUrl;
-    } catch {
-      // Server not ready yet — keep polling.
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error('Electron window did not register for CDP in time');
-}
-
-// The CDP target (and a successful Runtime.enable) can exist before
-// index.html has actually finished its own initial navigation — a relative
-// `import('./renderer.js')` attempted in that window briefly fails with
-// "Failed to resolve module specifier" (observed on a real windows-latest
-// CI run). Retry instead of treating one early attempt as authoritative.
-async function importRendererModule(timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      await evaluate(`(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
-      return;
-    } catch (err) {
-      lastError = err;
-      await new Promise((r) => setTimeout(r, 200));
-    }
-  }
-  throw lastError;
-}
-
-// `node_modules/.bin/electron` is itself a Node wrapper script that spawns
-// the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it — a plain `child.kill()` on
-// that wrapper doesn't reliably take the real Electron process (and its own
-// Renderer/GPU/Utility helper processes) down with it, especially under
-// SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned
-// processes keep squatting on this file's CDP port, so a later test run's
-// `waitForDebuggerUrl()` can attach to a stale, already-exited-code Electron
-// window instead of spawning a fresh one. Spawning with `detached: true`
-// puts the whole tree in its own POSIX process group; killing the NEGATIVE
-// pid (`-child.pid`) sends the signal to every process in that group at
-// once. Falls back to a plain kill if that's unavailable (e.g. Windows,
-// where process groups work differently) or the process already exited.
-function killElectron(child) {
-  if (!child) return;
-  try {
-    process.kill(-child.pid, 'SIGKILL');
-  } catch {
-    child.kill('SIGKILL');
-  }
-}
+let session;
 
 before(async () => {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-
-  // A scratch --user-data-dir both isolates settings.json from the real
-  // profile/other concurrent test files, and gives this file direct
-  // filesystem access to assert on the persisted settings, not just what
-  // the renderer reports about itself.
-  userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-options-userdata-'));
-  electronProcess = spawn(
-    electronBinPath,
-    ['.', `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${userDataDir}`],
-    // `detached: true` puts this whole process tree in its own process
-    // group — see the comment on killElectron() above for why that matters.
-    { cwd: projectRoot, env, stdio: 'ignore', detached: true },
-  );
-
-  const wsUrl = await waitForDebuggerUrl(20000);
-  ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, { once: true });
-    ws.addEventListener('error', reject, { once: true });
-  });
-  await send('Runtime.enable');
-
-  await importRendererModule();
-  // Deterministic starting language regardless of the host OS's locale —
-  // this has to go through the renderer's own
-  // switchLocale(), not window.api.saveSettings() directly, since the latter
-  // only updates main.js's own state, not the already-running renderer's
-  // `t` binding.
-  await evaluate(`__mod.switchLocale('en'); true`);
+  session = await startSession({ name: 'options', port: CDP_PORTS.optionsDialog });
 });
 
 after(async () => {
-  ws?.close();
-  killElectron(electronProcess);
-  if (userDataDir) {
-    await fs.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
-  }
+  await session?.close();
 });
 
+const evaluate = (expression) => session.evaluate(expression);
+
 async function readSettingsFile() {
-  const raw = await fs.readFile(path.join(userDataDir, 'settings.json'), 'utf8');
+  const raw = await fs.readFile(path.join(session.userDataDir, 'settings.json'), 'utf8');
   return JSON.parse(raw);
+}
+
+// Settings are written by main.js after an IPC round trip, so the file lags
+// the UI action that triggered it by an unpredictable amount. Polling for the
+// expected content is both faster than a fixed delay on a quick machine and
+// reliable on a loaded one; on failure it reports what the file actually held.
+async function waitForSettings(predicate, description, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    last = await readSettingsFile().catch(() => null);
+    if (last && predicate(last)) return last;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(
+    `Timed out after ${timeoutMs}ms waiting for ${description}; settings.json holds ${JSON.stringify(last)}`,
+  );
 }
 
 // Every one of these toolbar buttons gets an icon injected via
@@ -254,11 +132,10 @@ test('changing the default grid-columns setting round-trips into settings.json',
       return true;
     })()
   `);
-  // saveSettings() is async (IPC round trip) — give it a moment before
-  // reading the file back from disk.
-  await new Promise((r) => setTimeout(r, 300));
-
-  const settings = await readSettingsFile();
+  // saveSettings() is async (IPC round trip), so poll the file until the
+  // write has actually landed rather than assuming a fixed delay is enough.
+  const settings = await waitForSettings((s) => s.gridColumnsPerRow === 12,
+    'gridColumnsPerRow to become 12');
   assert.equal(settings.gridColumnsPerRow, 12);
 
   await evaluate(`(() => { document.querySelector('.options-overlay')?.remove(); return true; })()`);
@@ -280,7 +157,7 @@ test('the version text survives a settings change (regression: save-settings use
       return true;
     })()
   `);
-  await new Promise((r) => setTimeout(r, 300));
+  await waitForSettings((s) => s.gridColumnsPerRow === 5, 'gridColumnsPerRow to become 5');
 
   const versionText = await evaluate(`
     [...document.querySelectorAll('.options-overlay p')].find((p) => p.textContent.startsWith('Version'))?.textContent
@@ -300,7 +177,7 @@ test('switching language in Options changes both the dialog itself and static to
       return true;
     })()
   `);
-  await new Promise((r) => setTimeout(r, 300));
+  await waitForSettings((s) => s.locale === 'de', 'locale to become de');
 
   const shortcutsTitle = await evaluate(`document.getElementById('shortcuts-button').title`);
   assert.equal(shortcutsTitle, 'Tastenkombinationen anzeigen (Strg/Cmd+/)');
@@ -334,7 +211,7 @@ test('the auto-update toggle persists to settings.json', async () => {
       return true;
     })()
   `);
-  await new Promise((r) => setTimeout(r, 300));
+  await waitForSettings((s) => s.autoUpdateEnabled === false, 'autoUpdateEnabled to become false');
 
   const settings = await readSettingsFile();
   assert.equal(settings.autoUpdateEnabled, false);

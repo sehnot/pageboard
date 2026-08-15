@@ -1832,6 +1832,15 @@ function zoomAtPoint(state, clientX, clientY, factor, findAnchor) {
 function scheduleRebake(state) {
   clearTimeout(state.rebakeTimer);
   state.rebakeTimer = setTimeout(async () => {
+    // `rebakeTimer`/`rebakeRunning` together answer "is this view still going
+    // to change on its own?". Only isViewIdleForTests() reads them; the app
+    // itself doesn't need to know, but a test does — measuring or clicking
+    // while a rebake is about to swap every canvas element out produces
+    // results that depend purely on timing (a second click landing mid-swap
+    // is dropped by the browser, since its target no longer matches the
+    // first click's).
+    state.rebakeTimer = null;
+    state.rebakeRunning = true;
     const slots = [...state.container.querySelectorAll('.page-slot.rendered')];
     const targetZoom = state.zoom; // snapshot: the debounce guarantees stability while the batch runs
 
@@ -1879,7 +1888,17 @@ function scheduleRebake(state) {
     // The gesture counts as finished — the next zoom input looks for a
     // fresh anchor at the then-current cursor position again.
     state.activeAnchor = null;
+    state.rebakeRunning = false;
   }, 200);
+}
+
+// True when neither view still has a re-raster pending or in flight, i.e.
+// nothing is going to move or be replaced on its own any more. Used by the
+// CDP test harness to wait for a settled view instead of sleeping a fixed
+// amount and hoping — see the comment inside scheduleRebake().
+function isViewIdleForTests() {
+  return [canvasZoomState, gridZoomState]
+    .every((state) => !state.rebakeTimer && !state.rebakeRunning);
 }
 
 // Manually zooming/panning while in focus mode automatically exits it.
@@ -2394,8 +2413,52 @@ gridColumnsPerRow = currentSettings.gridColumnsPerRow;
 gridColumnsSelect.value = String(gridColumnsPerRow);
 setView(currentSettings.view); // also calls renderActiveView() internally
 
+// Returns the renderer to its just-started state: no documents, no focus
+// mode, no selection, zoom and scroll back at their defaults. Only ever
+// called by the CDP test harness (test/helpers/cdp-session.mjs), between
+// tests.
+//
+// It lives here rather than being assembled from the outside because all of
+// the state it has to clear is module-private — and getting it complete
+// matters: tests in one file share a single running renderer, so anything
+// left behind leaks into the next test. A focus mode left active by a failed
+// assertion once made the two following tests fail as well, reporting one
+// real bug as three red tests.
+function resetViewStateForTests() {
+  exitFocusMode();
+
+  for (const state of [canvasZoomState, gridZoomState]) {
+    // A pending rebake would otherwise fire mid-next-test and re-raster
+    // everything at the zoom level this reset is about to discard.
+    clearTimeout(state.rebakeTimer);
+    state.rebakeTimer = null;
+    state.activeAnchor = null;
+    state.zoom = 1;
+    state.bakedZoom = 1;
+    state.wrapper.style.zoom = '1';
+    state.container.scrollLeft = 0;
+    state.container.scrollTop = 0;
+    applyBakedSizes(state);
+  }
+
+  selectedPageIds.clear();
+  selectionAnchorPageId = null;
+
+  // Removing documents notifies the store, which rebuilds the active view —
+  // that rebuild should see the already-reset zoom/spacing values.
+  for (const doc of [...store.documents]) store.removeDocument(doc.id);
+
+  // renderActiveView() returns early once the last document is gone (it just
+  // shows the empty state), so both view trees keep whatever slots they last
+  // held. Harmless for the app, since both are hidden by then — but a test
+  // querying `.page-slot` afterwards would still find the previous test's
+  // pages. Clear them explicitly.
+  canvasZoomWrapper.innerHTML = '';
+  gridZoomWrapper.innerHTML = '';
+}
+
 // Re-exported for targeted verification (e.g. via the Chrome DevTools
-// Protocol console) and future automated tests; doesn't change its behavior
+// Protocol console) and automated tests; doesn't change its behavior
 // as a page entry point, since browsers ignore a module script's exports as
 // long as nobody imports it.
 export {
@@ -2407,4 +2470,6 @@ export {
   saveDocuments,
   closeDocument,
   switchLocale,
+  resetViewStateForTests,
+  isViewIdleForTests,
 };

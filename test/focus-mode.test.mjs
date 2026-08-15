@@ -1,174 +1,76 @@
-import { test, before, after } from 'node:test';
+import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import fs from 'node:fs/promises';
-import os from 'node:os';
-// The `electron` package's main entry, when required/imported from a plain
-// Node context (not Electron's own runtime), resolves to the absolute path
-// of the platform binary itself — Electron.app/.../Electron on macOS,
-// electron.exe on Windows, no .bin wrapper script or shell involved. Using
-// this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI:
-// spawning a .cmd file directly (without `shell: true`) fails with
-// `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
-// were a binary.
-import electronBinPath from 'electron';
+import { startSession, CDP_PORTS, testFilesDir, VIEWPORT } from './helpers/cdp-session.mjs';
 
 // Focus mode (reworked based on user feedback after the initial
-// implementation) had no automated
-// coverage, even though two of the three most recently found bugs there
-// were purely geometric/structural states (centered vs. left-aligned, which
-// document is visible after a zoom exit) rather than subjective-visual
-// "does this feel right" questions — cases like that can be checked via the
-// exact same CDP technique as in error-handling.test.mjs, with no
-// pixel/screenshot comparison at all. What's deliberately NOT checked
-// here: whether a zoom gesture feels smooth, whether sharpness/colors are
-// right, etc. — that rightly stays part of the manual test checklist.
-
-const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const testFilesDir = path.join(projectRoot, 'pdf-files', 'test-files');
-// Three files with genuinely different page dimensions from each other
-// (not just different content) — needed to trigger the geometric edge
-// cases this test targets. Verified
-// via pdf-lib before picking these: 004 is plain A4 (595x842), 019 is a
-// small non-standard size (243x338), 027 has four internally different
-// page sizes of its own (600x720/450x540/550x420/550x780) — 026 was
-// considered but rejected, since it defaults to the exact same A4 size as
-// 004 and would have added no real dimensional diversity.
+// implementation) had no automated coverage, even though two of the three
+// most recently found bugs there were purely geometric/structural states
+// (centered vs. left-aligned, which document is visible after a zoom exit)
+// rather than subjective-visual ones. Those are exactly what CAN be asserted
+// mechanically, with no pixel/screenshot comparison at all. What's
+// deliberately NOT checked here: whether a zoom gesture feels smooth, whether
+// sharpness/colors are right — that rightly stays part of the manual test
+// checklist.
+//
+// Three files with genuinely different page dimensions from each other (not
+// just different content) — needed to trigger the geometric edge cases this
+// test targets. Verified via pdf-lib before picking these: 004 is plain A4
+// (595x842), 019 is a small non-standard size (243x338), 027 has four
+// internally different page sizes of its own
+// (600x720/450x540/550x420/550x780).
 const FOCUS_TEST_FILES = [
-  path.join(testFilesDir, '004-pdflatex-4-pages', 'pdflatex-4-pages.pdf'),
-  path.join(testFilesDir, '019-grayscale-image', 'grayscale-image.pdf'),
-  path.join(testFilesDir, '027-cropped-rotated-scaled', 'cropped-rotated-scaled.pdf'),
-];
-// A separate port — error-handling.test.mjs uses 9422, e2e-critical-path.test.mjs
-// uses 9423; node:test can run multiple test files concurrently, each with
-// its own Electron process, so a shared port would collide.
-const CDP_PORT = 9424;
+  ['004-pdflatex-4-pages', 'pdflatex-4-pages.pdf'],
+  ['019-grayscale-image', 'grayscale-image.pdf'],
+  ['027-cropped-rotated-scaled', 'cropped-rotated-scaled.pdf'],
+].map(([dir, file]) => path.join(testFilesDir, dir, file));
 
-let electronProcess;
-let ws;
-let msgId = 0;
-let userDataDir;
+// renderer.js zooms the focused page to fill this fraction of the window.
+// Because the harness pins the viewport (see VIEWPORT), the resulting size is
+// a known number rather than something that drifts with the OS's window
+// chrome — which is what lets the assertions below be exact instead of the
+// "at least 1.15x taller" they had to settle for before.
+const FOCUS_MODE_FILL_RATIO = 0.92;
+const EXPECTED_FOCUSED_HEIGHT = VIEWPORT.height * FOCUS_MODE_FILL_RATIO;
 
-function send(method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const id = ++msgId;
-    const onMessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.id !== id) return;
-      ws.removeEventListener('message', onMessage);
-      clearTimeout(timer);
-      resolve(msg);
-    };
-    ws.addEventListener('message', onMessage);
-    ws.send(JSON.stringify({ id, method, params }));
-    // Cleared above on a normal response — otherwise this timer keeps
-    // Node's event loop alive until it fires, delaying process exit by up
-    // to its own delay even though the promise already settled.
-    const timer = setTimeout(() => reject(new Error(`CDP timeout on ${method}`)), 15000);
-  });
-}
+let session;
 
-async function evaluate(expression) {
-  const msg = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-  if (msg.result.exceptionDetails) {
-    throw new Error(`Renderer exception: ${JSON.stringify(msg.result.exceptionDetails)}`);
-  }
-  return msg.result.result?.value;
-}
+before(async () => {
+  session = await startSession({ name: 'focus-mode', port: CDP_PORTS.focusMode });
+});
 
-async function waitForDebuggerUrl(timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json`);
-      const targets = await res.json();
-      const page = targets.find((t) => t.type === 'page');
-      if (page) return page.webSocketDebuggerUrl;
-    } catch {
-      // Server not ready yet — keep polling.
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error('Electron window did not register for CDP in time');
-}
+// Each test starts from a clean slate. Previously all four shared one
+// long-lived state, and a failing assertion left focus mode active — which
+// made the following tests fail too, reporting one real bug as three red
+// tests.
+beforeEach(async () => {
+  await session.reset();
+  await session.openFiles(FOCUS_TEST_FILES);
+});
 
-// The CDP target (and a successful Runtime.enable) can exist before
-// index.html has actually finished its own initial navigation — a relative
-// `import('./renderer.js')` attempted in that window briefly fails with
-// "Failed to resolve module specifier" (observed on a real windows-latest
-// CI run). Retry instead of treating one early attempt as authoritative.
-async function importRendererModule(timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      await evaluate(`(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
-      return;
-    } catch (err) {
-      lastError = err;
-      await new Promise((r) => setTimeout(r, 200));
-    }
-  }
-  throw lastError;
-}
+after(async () => {
+  await session?.close();
+});
 
-// `node_modules/.bin/electron` is itself a Node wrapper script that spawns
-// the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it — a plain `child.kill()` on
-// that wrapper doesn't reliably take the real Electron process (and its own
-// Renderer/GPU/Utility helper processes) down with it, especially under
-// SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned
-// processes keep squatting on this file's CDP port, so a later test run's
-// `waitForDebuggerUrl()` can attach to a stale, already-exited-code Electron
-// window instead of spawning a fresh one. Spawning with `detached: true`
-// puts the whole tree in its own POSIX process group; killing the NEGATIVE
-// pid (`-child.pid`) sends the signal to every process in that group at
-// once. Falls back to a plain kill if that's unavailable (e.g. Windows,
-// where process groups work differently) or the process already exited.
-function killElectron(child) {
-  if (!child) return;
-  try {
-    process.kill(-child.pid, 'SIGKILL');
-  } catch {
-    child.kill('SIGKILL');
-  }
-}
-
-// A double-click as two real mouse clicks (clickCount 1, then 2) instead of
-// a synthetic 'dblclick' event — this way it exercises the same
-// click/click/dblclick sequence a real double-click triggers in the
-// browser.
-async function realDoubleClick(x, y) {
-  for (let clickCount = 1; clickCount <= 2; clickCount += 1) {
-    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount });
-    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount });
-  }
-}
-
-// `Input.dispatchMouseEvent` of type 'mouseWheel' reliably hangs over CDP
-// against this Electron version — instead, construct and
-// dispatch a real WheelEvent directly in the renderer, which triggers the
-// exact same JS listener chain (attachZoomHandler).
-async function dispatchCtrlWheel(x, y, deltaY) {
-  await evaluate(`
+function rectOf(selector) {
+  return session.evaluate(`
     (() => {
-      const container = document.getElementById('canvas-view').classList.contains('hidden')
-        ? document.getElementById('grid-view')
-        : document.getElementById('canvas-view');
-      const event = new WheelEvent('wheel', {
-        deltaY: ${deltaY}, ctrlKey: true, bubbles: true, cancelable: true, clientX: ${x}, clientY: ${y},
-      });
-      container.dispatchEvent(event);
-      return true;
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { left: r.left, top: r.top, width: r.width, height: r.height };
     })()
   `);
 }
 
-async function rectOf(selector) {
-  return evaluate(`
+// Waits until the view has finished re-rasterizing, then returns the
+// element's box. Focus mode zooms and then re-rasters behind a 200ms debounce,
+// so a rect read the instant the .focused class appears is not yet the final
+// one — and clicking during that window is worse than merely imprecise (see
+// waitForIdle() in the harness).
+async function settledRectOf(selector) {
+  await session.waitForIdle();
+  return session.evaluate(`
     (() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return null;
@@ -182,204 +84,188 @@ function centerOf(rect) {
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
 }
 
-before(async () => {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
+// A double-click as two real mouse clicks (clickCount 1, then 2) instead of a
+// synthetic 'dblclick' event — this way it exercises the same
+// click/click/dblclick sequence a real double-click triggers in the browser.
+//
+// All four events are written to the CDP socket before awaiting any of the
+// replies. Awaiting each one individually (as this did originally) puts a full
+// round trip between the first and second click, and under heavy CPU load that
+// gap can exceed Chromium's double-click interval — the two clicks are then
+// treated as unrelated single clicks, no dblclick is synthesized, and focus
+// mode never opens. Reproduced by running the suite with twice as many busy
+// processes as cores. Order is preserved: `send()` writes to the socket
+// synchronously, and CDP processes messages in the order they arrive.
+async function realDoubleClick(x, y) {
+  const base = { x, y, button: 'left' };
+  await Promise.all([
+    session.send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed', clickCount: 1 }),
+    session.send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', clickCount: 1 }),
+    session.send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed', clickCount: 2 }),
+    session.send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', clickCount: 2 }),
+  ]);
+}
 
-  // A scratch --user-data-dir isolates this run's settings.json from the
-  // real profile and from other CDP test files' Electron instances, which
-  // node:test can run concurrently.
-  userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-focus-mode-userdata-'));
-  electronProcess = spawn(
-    electronBinPath,
-    ['.', `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${userDataDir}`],
-    // `detached: true` puts this whole process tree in its own process
-    // group — see the comment on killElectron() above for why that matters.
-    { cwd: projectRoot, env, stdio: 'ignore', detached: true },
-  );
-
-  const wsUrl = await waitForDebuggerUrl(20000);
-  ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, { once: true });
-    ws.addEventListener('error', reject, { once: true });
+// Double-clicks the given slot and waits until focus mode is actually active,
+// rather than assuming the click landed. If it ever doesn't, the failure says
+// so directly instead of surfacing as a confusing geometry assertion later.
+async function focusByDoubleClick(selector) {
+  const rect = await settledRectOf(selector);
+  const c = centerOf(rect);
+  await realDoubleClick(c.x, c.y);
+  await session.waitFor(`!!document.querySelector('.page-slot.focused')`, {
+    message: `double-click at (${Math.round(c.x)}, ${Math.round(c.y)}) did not enter focus mode`,
   });
-  await send('Runtime.enable');
+  return rect;
+}
 
-  await importRendererModule();
+async function exitFocusByDoubleClick() {
+  const focused = await settledRectOf('.page-slot.focused');
+  const c = centerOf(focused);
+  await realDoubleClick(c.x, c.y);
+  await session.waitFor(`!document.querySelector('.page-slot.focused')`, {
+    message: 'second double-click did not leave focus mode',
+  });
+}
 
-  await evaluate(`
-    (async () => {
-      const fileInfos = await window.api.readPdfFiles(${JSON.stringify(FOCUS_TEST_FILES)});
-      await __mod.handleOpenedFiles(fileInfos);
+// `Input.dispatchMouseEvent` of type 'mouseWheel' reliably hangs over CDP
+// against this Electron version — instead, construct and dispatch a real
+// WheelEvent directly in the renderer, which triggers the exact same JS
+// listener chain (attachZoomHandler).
+async function dispatchCtrlWheel(x, y, deltaY) {
+  await session.evaluate(`
+    (() => {
+      const container = document.getElementById('canvas-view').classList.contains('hidden')
+        ? document.getElementById('grid-view')
+        : document.getElementById('canvas-view');
+      const event = new WheelEvent('wheel', {
+        deltaY: ${deltaY}, ctrlKey: true, bubbles: true, cancelable: true, clientX: ${x}, clientY: ${y},
+      });
+      container.dispatchEvent(event);
       return true;
     })()
   `);
-  // Wait for the first render (virtualization/rasterization of the first pages).
-  await new Promise((r) => setTimeout(r, 800));
-});
+}
 
-after(async () => {
-  ws?.close();
-  killElectron(electronProcess);
-  if (userDataDir) {
-    await fs.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
-  }
-});
+// Switching views rebuilds the target view's DOM from scratch; its slots then
+// need rasterizing before anything can be measured against them.
+async function switchToView(view) {
+  await session.evaluate(`__mod.setView('${view}')`);
+  await session.waitFor(
+    `document.querySelectorAll('#${view}-view .page-slot').length > 0`,
+    { message: `${view} view never rendered any page slots` },
+  );
+  await session.forceRenderAllSlots();
+}
 
 test('double-click in Canvas mode enlarges the page to fill the frame and centers it horizontally', async () => {
-  await evaluate(`__mod.setView('canvas')`);
-  await new Promise((r) => setTimeout(r, 300));
+  await switchToView('canvas');
+  const before = await focusByDoubleClick('#canvas-view .page-slot');
+  const focused = await settledRectOf('.page-slot.focused');
 
-  const before_ = await rectOf('#canvas-view .page-slot');
-  const c = centerOf(before_);
-  await realDoubleClick(c.x, c.y);
-  await new Promise((r) => setTimeout(r, 600));
-
-  const focused = await rectOf('.page-slot.focused');
-  assert.ok(focused, 'a page should carry the .focused class after the double-click');
-
-  const windowSize = await evaluate(`({ w: window.innerWidth, h: window.innerHeight })`);
-  // `.page-slot`'s width is already stretched to the column width via
-  // flexbox cross-axis in Canvas mode (already ~380px before, see
-  // CANVAS_COLUMN_WIDTH) — a before/after width comparison would therefore
-  // be misleading. Height, on the other hand, isn't stretched (the flex
-  // main axis, follows the actual render resolution) and is thus the
-  // reliable growth signal. The growth ratio is height-bound here (see
-  // FOCUS_MODE_FILL_RATIO below) and thus a function of window.innerHeight
-  // alone, which isn't this test's to control — a real run measured 1.2
-  // (1000x700 CI-like window) up to 1.4 (1200x800 local, minus title-bar
-  // chrome eating into innerHeight). 1.15 stays well clear of that observed
-  // range on the low end while still catching a real "barely moved" bug
-  // (ratio ~1.0).
-  assert.ok(focused.height > before_.height * 1.15, 'page should be noticeably taller in focus mode than before');
-  // Fill the frame: close to the window size on at least one axis
-  // (FOCUS_MODE_FILL_RATIO = 0.92 in renderer.js, tolerated more generously here).
-  assert.ok(focused.width >= windowSize.w * 0.6 || focused.height >= windowSize.h * 0.6, 'page should approximately fill the frame');
-
-  const focusedCenter = centerOf(focused);
+  // The page is zoomed to fill FOCUS_MODE_FILL_RATIO of the window on its
+  // limiting axis — for these fixtures that's the height. With a pinned
+  // viewport this is an exact expected number, so the assertion states the
+  // actual contract ("fills 92% of the window") instead of the vague "grew a
+  // bit" it had to use when the window size was unpredictable.
   assert.ok(
-    Math.abs(focusedCenter.x - windowSize.w / 2) < 40,
-    `page should be centered horizontally (center at ${focusedCenter.x}, expected near ${windowSize.w / 2})`,
+    Math.abs(focused.height - EXPECTED_FOCUSED_HEIGHT) < EXPECTED_FOCUSED_HEIGHT * 0.02,
+    `focused page should fill ~${EXPECTED_FOCUSED_HEIGHT}px of height, got ${focused.height}`,
+  );
+  assert.ok(
+    focused.height > before.height * 1.2,
+    `page should be noticeably taller in focus mode (before ${before.height}, after ${focused.height})`,
   );
 
-  // Other documents are no longer visible in the meantime (rest of the
-  // canvas hidden while focused).
-  const otherDocsVisible = await evaluate(`
+  assert.ok(
+    Math.abs(centerOf(focused).x - VIEWPORT.width / 2) < 5,
+    `page should be centered horizontally (center at ${centerOf(focused).x}, expected ${VIEWPORT.width / 2})`,
+  );
+
+  // Other documents are no longer visible in the meantime (rest of the canvas
+  // hidden while focused).
+  const otherDocsHidden = await session.evaluate(`
     [...document.querySelectorAll('#canvas-view .document-container')]
       .filter(el => !el.contains(document.querySelector('.focused')))
       .every(el => getComputedStyle(el).display === 'none')
   `);
-  assert.equal(otherDocsVisible, true, 'other documents should be hidden during focus mode');
-
-  // Clean up for the next tests: exit focus mode again.
-  const centerFocused = centerOf(focused);
-  await realDoubleClick(centerFocused.x, centerFocused.y);
-  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(otherDocsHidden, true, 'other documents should be hidden during focus mode');
 });
 
 test('double-click in Grid also centers the page (regression test: used to be left-aligned)', async () => {
-  await evaluate(`__mod.setView('grid')`);
-  await new Promise((r) => setTimeout(r, 400));
+  await switchToView('grid');
+  await focusByDoubleClick('#grid-view .page-slot');
+  const focused = await settledRectOf('.page-slot.focused');
 
-  const before_ = await rectOf('#grid-view .page-slot');
-  const c = centerOf(before_);
-  await realDoubleClick(c.x, c.y);
-  await new Promise((r) => setTimeout(r, 600));
-
-  const focused = await rectOf('.page-slot.focused');
-  assert.ok(focused, 'a page should carry the .focused class after the double-click');
-
-  const windowSize = await evaluate(`({ w: window.innerWidth, h: window.innerHeight })`);
-  const focusedCenter = centerOf(focused);
+  // The bug this guards against left the page in column 1 of a still-N-columns
+  // wide grid, i.e. far left rather than centered.
   assert.ok(
-    Math.abs(focusedCenter.x - windowSize.w / 2) < 40,
-    `grid page should be centered horizontally, not left-aligned (center at ${focusedCenter.x}, expected near ${windowSize.w / 2})`,
+    Math.abs(centerOf(focused).x - VIEWPORT.width / 2) < 5,
+    `grid page should be centered horizontally, not left-aligned (center at ${centerOf(focused).x}, expected ${VIEWPORT.width / 2})`,
   );
-
-  const centerFocused = centerOf(focused);
-  await realDoubleClick(centerFocused.x, centerFocused.y);
-  await new Promise((r) => setTimeout(r, 400));
+  assert.ok(
+    Math.abs(focused.height - EXPECTED_FOCUSED_HEIGHT) < EXPECTED_FOCUSED_HEIGHT * 0.02,
+    `focused page should fill ~${EXPECTED_FOCUSED_HEIGHT}px of height, got ${focused.height}`,
+  );
 });
 
 test('a second double-click restores the previous zoom level/position', async () => {
-  await evaluate(`__mod.setView('canvas')`);
-  await new Promise((r) => setTimeout(r, 300));
+  await switchToView('canvas');
+  const before = await focusByDoubleClick('#canvas-view .page-slot');
 
-  const before_ = await rectOf('#canvas-view .page-slot');
-  const c = centerOf(before_);
-  await realDoubleClick(c.x, c.y);
-  await new Promise((r) => setTimeout(r, 600));
+  const focused = await settledRectOf('.page-slot.focused');
+  assert.ok(focused.height > before.height * 1.2, 'page should be taller in focus mode');
 
-  const focused = await rectOf('.page-slot.focused');
-  // Compare height instead of width — see the comment (and the threshold
-  // rationale) in the first test case.
-  assert.ok(focused.height > before_.height * 1.15, 'page should be taller in focus mode');
+  await exitFocusByDoubleClick();
 
-  const centerFocused = centerOf(focused);
-  await realDoubleClick(centerFocused.x, centerFocused.y);
-  await new Promise((r) => setTimeout(r, 600));
-
-  const stillFocused = await evaluate(`!!document.querySelector('.page-slot.focused')`);
-  assert.equal(stillFocused, false, 'focus mode should have ended after the second double-click');
-
-  const after_ = await rectOf('#canvas-view .page-slot');
+  const after = await settledRectOf('#canvas-view .page-slot');
   assert.ok(
-    Math.abs(after_.width - before_.width) < before_.width * 0.15,
-    `page size should be close to the original value again (before ${before_.width}px, after ${after_.width}px)`,
+    Math.abs(after.width - before.width) < before.width * 0.15,
+    `page size should be close to the original value again (before ${before.width}px, after ${after.width}px)`,
   );
 
-  const otherDocsVisible = await evaluate(`
+  const allDocsVisible = await session.evaluate(`
     [...document.querySelectorAll('#canvas-view .document-container')].every(el => getComputedStyle(el).display !== 'none')
   `);
-  assert.equal(otherDocsVisible, true, 'all documents should be visible again after the restore');
+  assert.equal(allDocsVisible, true, 'all documents should be visible again after the restore');
 });
 
 test('manually zooming in focus mode exits it without jumping to the first page (regression test)', async () => {
-  await evaluate(`__mod.setView('canvas')`);
-  await new Promise((r) => setTimeout(r, 300));
+  await switchToView('canvas');
 
   // Focus the third (last) document — a jump to the first page would be
   // clearly distinguishable here from correctly "staying in place", unlike
-  // with the first document. Unlike the earlier tests in this file (which
-  // all target the FIRST page-slot, already visible at scrollLeft 0), the
-  // third document's column isn't guaranteed to be scrolled into view at
-  // this point — explicitly scroll to it first, otherwise its computed
-  // "center" coordinate could fall outside the actual viewport, and a real
-  // click dispatched there hits nothing.
-  const thirdDocId = await evaluate(`__mod.store.documents[2].id`);
-  await evaluate(`
-    document.querySelector('.document-container[data-document-id="${thirdDocId}"] .page-slot')
+  // with the first document. Unlike the earlier tests in this file (which all
+  // target the FIRST page-slot, already visible at scrollLeft 0), the third
+  // document's column isn't guaranteed to be scrolled into view — scroll to it
+  // first, otherwise its computed "center" coordinate could fall outside the
+  // viewport and a real click dispatched there would hit nothing.
+  const thirdDocId = await session.evaluate(`__mod.store.documents[2].id`);
+  const thirdSlot = `.document-container[data-document-id="${thirdDocId}"] .page-slot`;
+  await session.evaluate(`
+    document.querySelector(${JSON.stringify(thirdSlot)})
       .scrollIntoView({ block: 'center', inline: 'center' });
     true;
   `);
-  await new Promise((r) => setTimeout(r, 200));
-  const before_ = await rectOf(`.document-container[data-document-id="${thirdDocId}"] .page-slot`);
-  const c = centerOf(before_);
-  await realDoubleClick(c.x, c.y);
-  await new Promise((r) => setTimeout(r, 600));
+  await focusByDoubleClick(thirdSlot);
 
-  const focused = await rectOf('.page-slot.focused');
-  assert.ok(focused, 'third document should be focused');
+  const focused = await settledRectOf('.page-slot.focused');
   const focusedCenter = centerOf(focused);
 
   await dispatchCtrlWheel(Math.round(focusedCenter.x), Math.round(focusedCenter.y), -20);
-  await new Promise((r) => setTimeout(r, 500));
+  await session.waitFor(`!document.querySelector('.page-slot.focused')`, {
+    message: 'manual zoom should have ended focus mode',
+  });
 
-  const stillFocused = await evaluate(`!!document.querySelector('.page-slot.focused')`);
-  assert.equal(stillFocused, false, 'focus mode should have ended due to the manual zoom');
-
-  // Exact centering after the exit isn't always geometrically possible —
-  // with few/narrow documents, the scrollable area isn't enough at this
-  // zoom level to push the last column all the way to the window center
-  // (the scroll then hits its edge). The property actually
-  // guaranteed: no jump back to the FIRST document (the reported bug), and
-  // the previously focused document stays visible instead of being
-  // scrolled out of view.
-  const firstDocId = await evaluate(`__mod.store.documents[0].id`);
-  const windowSize = await evaluate(`({ w: window.innerWidth, h: window.innerHeight })`);
-  const docAtCenter = await evaluate(`
-    document.elementFromPoint(${windowSize.w / 2}, ${windowSize.h / 2})?.closest('.document-container')?.dataset.documentId ?? null
+  // Exact centering after the exit isn't always geometrically possible — with
+  // few/narrow documents, the scrollable area isn't enough at this zoom level
+  // to push the last column all the way to the window center (the scroll then
+  // hits its edge). The property actually guaranteed: no jump back to the
+  // FIRST document (the reported bug), and the previously focused document
+  // stays visible instead of being scrolled out of view.
+  const firstDocId = await session.evaluate(`__mod.store.documents[0].id`);
+  const docAtCenter = await session.evaluate(`
+    document.elementFromPoint(${VIEWPORT.width / 2}, ${VIEWPORT.height / 2})?.closest('.document-container')?.dataset.documentId ?? null
   `);
   assert.notEqual(
     docAtCenter,
@@ -387,7 +273,7 @@ test('manually zooming in focus mode exits it without jumping to the first page 
     `screen center should NOT have jumped to the first document (shows: ${docAtCenter})`,
   );
 
-  const thirdDocVisible = await evaluate(`
+  const thirdDocVisible = await session.evaluate(`
     (() => {
       const el = document.querySelector('.document-container[data-document-id="${thirdDocId}"]');
       const r = el.getBoundingClientRect();
@@ -397,6 +283,6 @@ test('manually zooming in focus mode exits it without jumping to the first page 
   assert.equal(
     thirdDocVisible,
     true,
-    'the previously focused (third) document should still be at least partially visible',
+    'the previously focused document should still be at least partially visible',
   );
 });
