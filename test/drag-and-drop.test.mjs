@@ -100,28 +100,36 @@ async function documentIdsInDom() {
   `);
 }
 
-// Scrolls an element (page slot or section header) into view and returns
-// its current center coordinates — same rationale as clickPage() in
+// Builds the source of a zero-arg function that scrolls an element (page
+// slot or section header) into view and returns its current center
+// coordinates (optionally offset) — same rationale as clickPage() in
 // interaction.test.mjs: a document column can be taller than the Electron
 // window, so a rect can't be trusted unless it's re-measured right after
-// scrolling.
-async function centerOfScrolledIntoView(selector) {
-  return evaluate(`
-    (() => {
-      const el = document.querySelector(${JSON.stringify(selector)});
-      el.scrollIntoView({ block: 'center', inline: 'center' });
-      const r = el.getBoundingClientRect();
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-    })()
-  `);
+// scrolling. Passed to dragAndDrop() so the scroll/measure happens in the
+// same Runtime.evaluate call as the drag dispatch itself — see the note on
+// dragAndDrop() below for why that matters.
+function dropPointAt(selector, { offsetX = 0, offsetY = 0 } = {}) {
+  return `() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2 + ${offsetX}, y: r.top + r.height / 2 + ${offsetY} };
+  }`;
 }
 
 // Runs a full dragstart -> dragover -> drop -> dragend sequence against a
 // single real DataTransfer, entirely inside one Runtime.evaluate call so
 // there's no gap where the app's own dragend/cleanup logic could race
 // against a separate round-trip: real DragEvents with a real DataTransfer
-// at explicit clientX/clientY.
-async function dragAndDrop(sourceSelector, dropClientX, dropClientY) {
+// at explicit clientX/clientY. `computeDropPoint` is the source of a
+// zero-arg function returning `{x, y}`, called synchronously right before
+// dragover/drop fire — this used to be measured in an earlier, separate
+// evaluate() call instead, which left a real round-trip gap between
+// measuring the drop target's position and actually dropping onto it; under
+// CI load that gap was long enough for the page to scroll/reflow in
+// between, so the drop landed slightly off target (observed as an
+// intermittent CI-only failure, not reproducible locally).
+async function dragAndDrop(sourceSelector, computeDropPoint) {
   return evaluate(`
     (() => {
       const source = document.querySelector(${JSON.stringify(sourceSelector)});
@@ -131,13 +139,14 @@ async function dragAndDrop(sourceSelector, dropClientX, dropClientY) {
       }));
       const sourceRect = source.getBoundingClientRect();
       fire(source, 'dragstart', sourceRect.left + sourceRect.width / 2, sourceRect.top + sourceRect.height / 2);
+      const { x, y } = (${computeDropPoint})();
       // dragover/drop listeners are bound directly to #canvas-view/#grid-view
       // (see renderer.js) — these tests stay in the default Canvas view
       // throughout, so #canvas-view is always the right dispatch target.
       const view = document.getElementById('canvas-view');
-      fire(view, 'dragover', ${dropClientX}, ${dropClientY});
-      fire(view, 'drop', ${dropClientX}, ${dropClientY});
-      fire(source, 'dragend', ${dropClientX}, ${dropClientY});
+      fire(view, 'dragover', x, y);
+      fire(view, 'drop', x, y);
+      fire(source, 'dragend', x, y);
       return true;
     })()
   `);
@@ -217,8 +226,10 @@ test('dragging a page within the same document reorders it', async () => {
   const [p0, p1, p2, p3] = pageIds;
 
   // Drag page 0 to before page 2 — expected order: p1, p0, p2, p3.
-  const target = await centerOfScrolledIntoView(`.page-slot[data-page-id="${p2}"]`);
-  await dragAndDrop(`.page-slot[data-page-id="${p0}"]`, target.x, target.y - 5);
+  await dragAndDrop(
+    `.page-slot[data-page-id="${p0}"]`,
+    dropPointAt(`.page-slot[data-page-id="${p2}"]`, { offsetY: -5 }),
+  );
 
   const after = await evaluate(`__mod.store.documents[0].pages.map((p) => p.id)`);
   assert.deepEqual(after, [p1, p0, p2, p3]);
@@ -234,8 +245,10 @@ test('dragging a page onto another document moves it across documents', async ()
   const lastOfA = pageIds[3]; // doc A's last page
   const firstOfB = pageIds[4]; // doc B's first page
 
-  const target = await centerOfScrolledIntoView(`.page-slot[data-page-id="${firstOfB}"]`);
-  await dragAndDrop(`.page-slot[data-page-id="${lastOfA}"]`, target.x, target.y - 5);
+  await dragAndDrop(
+    `.page-slot[data-page-id="${lastOfA}"]`,
+    dropPointAt(`.page-slot[data-page-id="${firstOfB}"]`, { offsetY: -5 }),
+  );
 
   const state = await evaluate(`
     ({
@@ -259,19 +272,16 @@ test('dragging a page past the last document creates a new document', async () =
   // The drop-edge zone is beyond the last document container's right edge
   // in Canvas view (findDropEdgeZone) — scroll the last container into view
   // first, then aim well past its right edge.
-  const lastContainerRect = await evaluate(`
-    (() => {
+  await dragAndDrop(
+    `.page-slot[data-page-id="${lastPage}"]`,
+    `() => {
       const containers = document.querySelectorAll('#canvas-view .document-container');
       const el = containers[containers.length - 1];
       el.scrollIntoView({ block: 'center', inline: 'end' });
       const r = el.getBoundingClientRect();
-      return { right: r.right, top: r.top, bottom: r.bottom };
-    })()
-  `);
-  const dropX = lastContainerRect.right + 200;
-  const dropY = (lastContainerRect.top + lastContainerRect.bottom) / 2;
-
-  await dragAndDrop(`.page-slot[data-page-id="${lastPage}"]`, dropX, dropY);
+      return { x: r.right + 200, y: (r.top + r.bottom) / 2 };
+    }`,
+  );
 
   const docCountAfter = await evaluate(`__mod.store.documents.length`);
   assert.equal(docCountAfter, docCountBefore + 1, 'dropping past the edge should create a new document');
@@ -289,18 +299,20 @@ test('dropping in the gap between two documents is a no-op — the page stays pu
 
   // The gap is the vertical strip between the end of doc A's column and the
   // start of doc B's column in Canvas view — computed from both containers'
-  // rects, not guessed, so it stays correct regardless of gap width.
-  const gapX = await evaluate(`
-    (() => {
+  // rects, not guessed, so it stays correct regardless of gap width. The y
+  // coordinate comes from doc B's first page, scrolled into view.
+  await dragAndDrop(
+    `.page-slot[data-page-id="${pageIds[0]}"]`,
+    `() => {
       const containers = document.querySelectorAll('#canvas-view .document-container');
       const a = containers[0].getBoundingClientRect();
       const b = containers[1].getBoundingClientRect();
-      return (a.right + b.left) / 2;
-    })()
-  `);
-  const targetRect = await centerOfScrolledIntoView(`.page-slot[data-page-id="${firstOfB}"]`);
-
-  await dragAndDrop(`.page-slot[data-page-id="${pageIds[0]}"]`, gapX, targetRect.y);
+      const target = document.querySelector(${JSON.stringify(`.page-slot[data-page-id="${firstOfB}"]`)});
+      target.scrollIntoView({ block: 'center', inline: 'center' });
+      const r = target.getBoundingClientRect();
+      return { x: (a.right + b.left) / 2, y: r.top + r.height / 2 };
+    }`,
+  );
 
   const after = await evaluate(`__mod.store.documents.map((d) => d.pages.map((p) => p.id))`);
   assert.deepEqual(after, before, 'no document should have changed');
@@ -316,10 +328,10 @@ test('dragging a document\'s section header reorders it among its siblings', asy
 
   // Drag doc B's header to before doc A's header — expected final order:
   // [docB, docA].
-  const target = await centerOfScrolledIntoView(
-    `.document-container[data-document-id="${docAId}"] .section-header`,
+  await dragAndDrop(
+    `.document-container[data-document-id="${docBId}"] .section-header`,
+    dropPointAt(`.document-container[data-document-id="${docAId}"] .section-header`),
   );
-  await dragAndDrop(`.document-container[data-document-id="${docBId}"] .section-header`, target.x, target.y);
 
   const docIdsAfter = await evaluate(`__mod.store.documents.map((d) => d.id)`);
   assert.deepEqual(docIdsAfter, [docBId, docAId]);
