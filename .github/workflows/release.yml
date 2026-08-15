@@ -16,12 +16,12 @@ name: Release
 # (max-parallel: 1) — electron-builder's GitHub publish provider doesn't
 # reuse an existing DRAFT release from an earlier job/run, so the second
 # job always created its own duplicate rather than finding the first job's
-# release. Found for real on the actual v1.0.0 release attempt, twice (see
-# LESSONS.md) — a single job that owns the one release call sidesteps the
+# release. Found for real on the actual v1.0.0 release attempt, twice — a
+# single job that owns the one release call sidesteps the
 # whole class of problem instead of trying to coordinate multiple
 # electron-builder publish invocations.
 #
-# Code signing/notarization is deliberately optional (see CLAUDE.md):
+# Code signing/notarization is deliberately optional:
 # without the secrets below, electron-builder automatically builds
 # unsigned (users see Gatekeeper/SmartScreen warnings); once certificates
 # exist, setting the secrets in the repo (Settings → Secrets and variables
@@ -75,7 +75,7 @@ jobs:
       # and not something anyone downloads directly, and not
       # builder-debug.yml (electron-builder's own internal debug log,
       # swept up by *.yml the first time this ran — found on the real
-      # v1.0.0 assets, see LESSONS.md — an internal file with CI machine
+      # v1.0.0 assets: an internal file with CI machine
       # paths in it has no business in a public release).
       - uses: actions/upload-artifact@v4
         with:

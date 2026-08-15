@@ -10,7 +10,7 @@ import os from 'node:os';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
@@ -21,9 +21,8 @@ import electronBinPath from 'electron';
 // importable under plain node:test (main.js needs real Electron,
 // renderer.js expects a browser context with window.api from the preload).
 // This test therefore launches the real app and drives it via the Chrome
-// DevTools Protocol as described in CLAUDE.md ("Headless UI verification")
-// — the same technique the fixes were originally verified with manually,
-// here turned into a permanent regression test.
+// DevTools Protocol — the same technique the fixes were originally verified
+// with manually, here turned into a permanent regression test.
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const errorCasesDir = path.join(projectRoot, 'pdf-files', 'error-cases');
@@ -59,8 +58,8 @@ function send(method, params = {}) {
 // Runs `expression` in the renderer and returns the value (structured via
 // JSON, see returnByValue) — throws if the evaluation itself threw a JS
 // exception, so a test failure doesn't silently slip through as `undefined`
-// (see LESSONS.md, "CDP Runtime.evaluate response read with the wrong
-// nesting": ALWAYS check exceptionDetails).
+// (CDP's Runtime.evaluate response nests exceptionDetails oddly enough that
+// it must always be checked explicitly).
 async function evaluate(expression) {
   const msg = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
   if (msg.result.exceptionDetails) {
@@ -87,7 +86,7 @@ async function waitForDebuggerUrl(timeoutMs) {
 
 // `node_modules/.bin/electron` is itself a Node wrapper script that spawns
 // the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it (see LESSONS.md) — a plain `child.kill()` on
+// termination signals to it — a plain `child.kill()` on
 // that wrapper doesn't reliably take the real Electron process (and its own
 // Renderer/GPU/Utility helper processes) down with it, especially under
 // SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned
@@ -110,7 +109,7 @@ function killElectron(child) {
 before(async () => {
   // Explicitly remove ELECTRON_RUN_AS_NODE instead of just trusting the
   // ambient environment — if the variable is set in the calling shell (e.g.
-  // a VS Code integrated terminal, see LESSONS.md), Electron would
+  // a VS Code integrated terminal), Electron would
   // otherwise start as a plain Node process with no window/ipcMain and
   // never load the app logic.
   const env = { ...process.env };
@@ -138,7 +137,7 @@ before(async () => {
   await send('Runtime.enable');
 
   // renderer.js re-exports store/handleOpenedFiles/saveDocuments etc.
-  // specifically for test sessions like this (see CLAUDE.md) — import it
+  // specifically for test sessions like this — import it
   // once here and anchor it on the page's globalThis, so all tests in this
   // file share the same running store (no Electron restart needed between
   // individual test cases).
@@ -156,7 +155,7 @@ before(async () => {
   // switchLocale() (same function the Options dialog's language picker
   // calls), not window.api.saveSettings() directly — the latter only
   // updates main.js's own state, it doesn't tell the already-running
-  // renderer to re-point its own `t` binding. See LESSONS.md.
+  // renderer to re-point its own `t` binding.
   await evaluate(`__mod.switchLocale('en'); true`);
 
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-error-cases-'));
@@ -267,8 +266,8 @@ test(
 test(
   'saving to a read-only directory: toast, document stays marked as unsaved',
   // Git tracks only the executable bit, not full permission modes — a
-  // chmod 444 set locally on pdf-files/test-files/ (see CLAUDE.md, repo
-  // conventions) does not survive `actions/checkout` on CI, so this test
+  // chmod 444 set locally on pdf-files/test-files/ (a repo convention)
+  // does not survive `actions/checkout` on CI, so this test
   // used to rely on repo-fixture permissions that only actually held on a
   // machine where someone had chmod'd them by hand. Locks its own scratch
   // copy instead, same pattern as the "undeletable" directory test below.
@@ -294,7 +293,7 @@ test(
     // displayName match could silently grab that wrong, unlocked document
     // instead of this test's own scratch copy. That mismatch was invisible
     // locally, where pdf-files/test-files/ also happens to be chmod 444 by
-    // hand, but surfaced for real on CI, where it isn't (see LESSONS.md).
+    // hand, but surfaced for real on CI, where it isn't.
     const outcome = await evaluate(`
       (async () => {
         const doc = __mod.store.documents.find(d => d.filePath === ${JSON.stringify(filePath)});
@@ -358,7 +357,7 @@ test(
     await fs.chmod(lockedDir, 0o555);
 
     // saveDocuments() blocks on the empty-documents dialog (a custom HTML
-    // overlay, not native UI — see CLAUDE.md, hence controllable via the
+    // overlay, not native UI, hence controllable via the
     // DOM) — deliberately not awaited right away, only after the dialog
     // interaction further below.
     await evaluate(`

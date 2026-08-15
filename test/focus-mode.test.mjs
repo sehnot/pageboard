@@ -10,14 +10,14 @@ import os from 'node:os';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
 import electronBinPath from 'electron';
 
 // Focus mode (reworked based on user feedback after the initial
-// implementation, see CLAUDE.md "Renderer internals" and LESSONS.md) had no automated
+// implementation) had no automated
 // coverage, even though two of the three most recently found bugs there
 // were purely geometric/structural states (centered vs. left-aligned, which
 // document is visible after a zoom exit) rather than subjective-visual
@@ -25,13 +25,13 @@ import electronBinPath from 'electron';
 // exact same CDP technique as in error-handling.test.mjs, with no
 // pixel/screenshot comparison at all. What's deliberately NOT checked
 // here: whether a zoom gesture feels smooth, whether sharpness/colors are
-// right, etc. — that rightly stays part of the manual TESTING.md checklist.
+// right, etc. — that rightly stays part of the manual test checklist.
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const testFilesDir = path.join(projectRoot, 'pdf-files', 'test-files');
 // Three files with genuinely different page dimensions from each other
 // (not just different content) — needed to trigger the geometric edge
-// cases this test targets (see LESSONS.md history on focus mode). Verified
+// cases this test targets. Verified
 // via pdf-lib before picking these: 004 is plain A4 (595x842), 019 is a
 // small non-standard size (243x338), 027 has four internally different
 // page sizes of its own (600x720/450x540/550x420/550x780) — 026 was
@@ -97,7 +97,7 @@ async function waitForDebuggerUrl(timeoutMs) {
 
 // `node_modules/.bin/electron` is itself a Node wrapper script that spawns
 // the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it (see LESSONS.md) — a plain `child.kill()` on
+// termination signals to it — a plain `child.kill()` on
 // that wrapper doesn't reliably take the real Electron process (and its own
 // Renderer/GPU/Utility helper processes) down with it, especially under
 // SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned
@@ -129,7 +129,7 @@ async function realDoubleClick(x, y) {
 }
 
 // `Input.dispatchMouseEvent` of type 'mouseWheel' reliably hangs over CDP
-// against this Electron version (see LESSONS.md) — instead, construct and
+// against this Electron version — instead, construct and
 // dispatch a real WheelEvent directly in the renderer, which triggers the
 // exact same JS listener chain (attachZoomHandler).
 async function dispatchCtrlWheel(x, y, deltaY) {
@@ -236,7 +236,7 @@ test('double-click in Canvas mode enlarges the page to fill the frame and center
   // (1000x700 CI-like window) up to 1.4 (1200x800 local, minus title-bar
   // chrome eating into innerHeight). 1.15 stays well clear of that observed
   // range on the low end while still catching a real "barely moved" bug
-  // (ratio ~1.0), see LESSONS.md.
+  // (ratio ~1.0).
   assert.ok(focused.height > before_.height * 1.15, 'page should be noticeably taller in focus mode than before');
   // Fill the frame: close to the window size on at least one axis
   // (FOCUS_MODE_FILL_RATIO = 0.92 in renderer.js, tolerated more generously here).
@@ -357,7 +357,7 @@ test('manually zooming in focus mode exits it without jumping to the first page 
   // Exact centering after the exit isn't always geometrically possible —
   // with few/narrow documents, the scrollable area isn't enough at this
   // zoom level to push the last column all the way to the window center
-  // (the scroll then hits its edge, see LESSONS.md). The property actually
+  // (the scroll then hits its edge). The property actually
   // guaranteed: no jump back to the FIRST document (the reported bug), and
   // the previously focused document stays visible instead of being
   // scrolled out of view.

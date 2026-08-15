@@ -308,7 +308,7 @@ function buildMenu() {
   // the same combination risks double-firing the action if Electron also
   // lets the keydown reach the renderer, which isn't practically verifiable
   // from this sandboxed dev environment (a packaged, launchable build was
-  // needed and wasn't available here — see LESSONS.md). These menu items
+  // needed and wasn't available here). These menu items
   // are a mouse-driven alternative path only; the keyboard shortcuts are
   // unaffected.
   template.push({
@@ -539,7 +539,7 @@ ipcMain.handle('confirm-close-with-unsaved-changes', async (event, displayName) 
 // silently drop those fields from an already-open Options dialog after any
 // change (found via manual smoke-testing: the Info section's version text
 // went blank/"undefined" after switching language, since that's also a
-// save-settings round trip — see LESSONS.md).
+// save-settings round trip).
 function enrichedSettings() {
   return {
     ...settingsCache,

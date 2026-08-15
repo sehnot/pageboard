@@ -7,8 +7,7 @@ import { getSafeExternalUrl } from '../src/url-safety.mjs';
 // shell.openExternal(), including file:///custom-protocol URLs that reach
 // the OS launcher outside Chromium's sandbox. Extracted into this pure
 // module specifically so the check itself is unit-testable without a
-// running Electron app (main.js can't be required under plain node:test,
-// see CLAUDE.md).
+// running Electron app (main.js can't be required under plain node:test).
 
 test('accepts a well-formed https URL, unchanged', () => {
   assert.equal(getSafeExternalUrl('https://github.com/foo/bar'), 'https://github.com/foo/bar');

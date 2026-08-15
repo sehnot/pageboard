@@ -208,7 +208,7 @@ function applyStaticTranslations() {
     // A `data-i18n` element that already has an element child (as opposed to
     // plain text) is almost always a button with a prepended icon SVG —
     // `el.textContent = ...` would silently wipe that child out from under
-    // it. This exact bug shipped once already (see LESSONS.md); this guard
+    // it. This exact bug shipped once already; this guard
     // turns a future recurrence into a console warning instead of a missing
     // icon nobody notices.
     if (el.firstElementChild) {
@@ -253,14 +253,13 @@ let preFocusViewState = null;
 // `bakedZoom` is the zoom level at which the currently visible pages were
 // last actually (sharply) rasterized. The not-yet-"baked" remainder is only
 // visually scaled up via CSS `zoom` (blurry, but instant) — see
-// zoomAtPoint()/scheduleRebake() and LESSONS.md ("pages look pixelated while
-// zooming").
+// zoomAtPoint()/scheduleRebake().
 const BASE_CANVAS_SCALE = 0.6;
 const BASE_GRID_SCALE = 0.25;
 const CANVAS_PLACEHOLDER_SIZE = { width: 340, height: 440 };
 const GRID_PLACEHOLDER_SIZE = { width: 180, height: 234 };
 // Base width of a document column at zoom 1 (see .canvas-column CSS — must
-// match the base render scale, otherwise pages overlap, see LESSONS.md).
+// match the base render scale, otherwise pages overlap).
 // Grows along with `bakedZoom` (applyBakedSizes()), otherwise `max-width:
 // 100%` on the pages would clip the sharply re-rendered image back down to
 // the old, unscaled column width after a rebake.
@@ -273,7 +272,7 @@ const CANVAS_COLUMN_WIDTH = 380;
 // vertically. With a column width identical across all documents, every
 // `.grid-pages` has the same total width (column count × this width) and
 // they all center at the same spot; documents with fewer pages simply fill
-// only the first columns from the left, see LESSONS.md. Some buffer above
+// only the first columns from the left. Some buffer above
 // the real render size at BASE_GRID_SCALE (0.25) — real pages usually come
 // out around ~125–155px.
 const GRID_COLUMN_WIDTH = 180;
@@ -292,7 +291,7 @@ const canvasZoomState = {
   // Without this coupling, spacing would stay stuck at its unscaled base
   // size when the wrapper's zoom scale resets, while the pages themselves
   // have already jumped to the new target size — visible flicker in the
-  // spacing between pages (see LESSONS.md).
+  // spacing between pages.
   spacing: { '--page-gap': 8, '--column-gap': 16 },
 };
 const gridZoomState = {
@@ -364,7 +363,7 @@ function exitFocusMode({ restore = false } = {}) {
     // offset, NOT at the original cursor position (clientX/clientY), which
     // the triggering zoom/pan handler uses next for its own anchor lookup
     // (`elementFromPoint`) — that then hits the wrong (neighboring)
-    // document (see LESSONS.md). So on top of that, explicitly set the zoom
+    // document. So on top of that, explicitly set the zoom
     // anchor to the page itself here: the following zoomAtPoint() call in
     // the handler then already sees a valid, connected anchor
     // (`state.activeAnchor?.el.isConnected` is true) and skips its own
@@ -417,7 +416,7 @@ function toggleFocusMode(slot) {
   // see index.html) — center ONLY AFTER that: scrollIntoView() has to
   // compute against the layout already collapsed onto the one page,
   // otherwise it still factors in the (merely invisible, but still wide)
-  // neighboring columns when centering (see LESSONS.md).
+  // neighboring columns when centering.
   state.container.classList.add('focus-active');
   slot.scrollIntoView({ block: 'center', inline: 'center' });
 }
@@ -485,7 +484,7 @@ function updateSelectionVisuals() {
 // --- Drag & drop of pages --------------------------------------------------
 // Deliberately the native HTML5 Drag and Drop API instead of a library
 // (dnd-kit is React-specific and doesn't fit this app's bundler-free
-// vanilla JS approach, see CLAUDE.md) or manual pointer-event tracking: the
+// vanilla JS approach) or manual pointer-event tracking: the
 // browser handles drag-threshold detection for free (a click without
 // significant movement still fires a normal `click`, no manual distinction
 // needed), the ghost image under the cursor, and Esc-to-cancel.
@@ -529,8 +528,8 @@ function startPageDrag(page, event) {
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/pageboard-pages', '1');
 
-  // Deliberately scoped to the active view: both views coexist in the DOM
-  // (see LESSONS.md), an unscoped querySelector could otherwise hit the
+  // Deliberately scoped to the active view: both views coexist in the DOM,
+  // an unscoped querySelector could otherwise hit the
   // (invisible) slot of the other view instead — with the effect that the
   // actually visible page shows no visual drag state AND is wrongly not
   // excluded from the reference-page lookup in findInsertionInDocument().
@@ -750,7 +749,7 @@ function handleDragOver(event) {
 // directly to their new spot, instead of triggering a full rebuild of the
 // active view (as a normal store change would). Without this, EVERY page in
 // the view would briefly disappear and re-rasterize — visible flicker even
-// for pages the actual move never touched (see LESSONS.md). Deliberately
+// for pages the actual move never touched. Deliberately
 // only affects the currently visible view: the other one gets fully rebuilt
 // from the then-current store state on the next switch anyway
 // (renderActiveView only rebuilds the active view, never the hidden one).
@@ -1449,7 +1448,7 @@ function switchLocale(locale) {
   // `<select>`, and saveSettingsPatch() is deliberately not awaited here —
   // without this, the rebuilt dialog would show the new language's text but
   // the picker itself would still show the previous selection until the IPC
-  // round trip finished (found via manual smoke-testing, see LESSONS.md).
+  // round trip finished (found via manual smoke-testing).
   if (currentSettings) currentSettings = { ...currentSettings, locale };
   applyStaticTranslations();
   renderActiveView();
@@ -1767,7 +1766,7 @@ saveAllButton.addEventListener('click', () => saveDocuments(store.documents.filt
 // column count (CSS Grid instead of flex-wrap, see renderGridView), zooming
 // never changes which page sits in which row anymore — the simple
 // `elementFromPoint` hit test used in Canvas mode is therefore now
-// sufficient here too (see LESSONS.md).
+// sufficient here too.
 
 function zoomAtPoint(state, clientX, clientY, factor, findAnchor) {
   const oldZoom = state.zoom;
@@ -1787,7 +1786,7 @@ function zoomAtPoint(state, clientX, clientY, factor, findAnchor) {
   // these ticks could make it jump back and forth between two almost
   // equally close elements — with a scroll correction that ended up far too
   // large relative to the actually tiny zoom change, reading as
-  // jitter/jumping (see LESSONS.md).
+  // jitter/jumping.
   if (!state.activeAnchor?.el.isConnected) {
     const el = findAnchor(state.container, clientX, clientY);
     if (el) {
@@ -1843,7 +1842,7 @@ function scheduleRebake(state) {
     // still-waiting neighbors AND the surrounding `gap`/`padding` spacing
     // (properties of the parent element, not correctable per page) stayed
     // at the old, only visually scaled-up size — visible size/spacing
-    // flicker while sharpening. See LESSONS.md.
+    // flicker while sharpening.
     const results = await Promise.all(
       slots.map(async (slot) => {
         const info = slotRenderInfo.get(slot);
@@ -1999,7 +1998,7 @@ async function renderPageIntoSlot(slot) {
   // scaled-along siblings AND than the still ambiently scaled `gap`/
   // `padding` of the parent element surrounding it — that can't be
   // corrected per page, because spacing belongs to the container, not the
-  // child (see LESSONS.md). The jump to the actual target resolution is
+  // child. The jump to the actual target resolution is
   // handled exclusively by scheduleRebake(), collectively and atomically
   // for all pages and spacing together.
   const canvas = await computeCanvas(page, state.bakedZoom, baseScale);
@@ -2054,7 +2053,7 @@ function renderDocumentPages(state, baseScale, doc, container, observer) {
     // Size is computed directly for the current (just baked, see
     // resetZoomBaking) zoom level, not the unscaled base size — otherwise a
     // newly opened document would look the wrong size in the middle of an
-    // ongoing zoom gesture (see LESSONS.md).
+    // ongoing zoom gesture.
     slot.style.width = `${state.placeholderSize.width * state.bakedZoom}px`;
     slot.style.height = `${state.placeholderSize.height * state.bakedZoom}px`;
     slot.dataset.pageId = page.id;

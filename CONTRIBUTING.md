@@ -14,13 +14,6 @@ npm test    # run the tests (node:test)
 Details on debugging, known environment gotchas (e.g.
 `ELECTRON_RUN_AS_NODE`), and the project architecture live in `README.md`.
 
-You may notice source comments referencing `CLAUDE.md`, `LESSONS.md`, or
-`TESTING.md` — these are the maintainer's own local working notes
-(architecture history, a running incident log, a manual test checklist) and
-are intentionally not part of this repo (see `.gitignore`). Where a comment
-points at one of them for "more detail," that detail just isn't available
-externally — the comment itself should still stand on its own.
-
 ## Before proposing a change
 
 - **Small fixes/improvements**: just open a pull request.

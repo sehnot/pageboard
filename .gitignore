@@ -5,8 +5,8 @@ out/
 *.log
 
 # Writable working copies of pdf-files/test-files/ for manually testing the
-# save flow (see CLAUDE.md/README.md) — deliberately modified/deleted during
-# that, so not version-controlled.
+# save flow — deliberately modified/deleted during that, so not
+# version-controlled.
 pdf-files/test-files-edit/
 
 # Internal concept/planning material and Claude working notes —

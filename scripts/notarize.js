@@ -4,8 +4,7 @@ const { notarize } = require('@electron/notarize');
 // optional: only runs when APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/
 // APPLE_TEAM_ID are set (e.g. as GitHub Actions secrets) — without these
 // variables (a local build, or as long as no Apple Developer account
-// exists), the step is skipped instead of failing the build, see the
-// signing decision in CLAUDE.md.
+// exists), the step is skipped instead of failing the build.
 module.exports = async function notarizing(context) {
   const { electronPlatformName, appOutDir } = context;
   if (electronPlatformName !== 'darwin') return;

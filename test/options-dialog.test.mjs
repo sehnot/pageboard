@@ -10,7 +10,7 @@ import os from 'node:os';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
@@ -18,11 +18,10 @@ import electronBinPath from 'electron';
 
 // Covers the Options dialog (i18n, default view/grid-columns settings,
 // auto-update toggle) end to end via the same CDP technique as
-// error-handling.test.mjs/focus-mode.test.mjs — see CLAUDE.md "Headless UI
-// verification". What's deliberately NOT checked here: real OS-locale
-// detection (machine-dependent, see TESTING.md) and actual network-backed
-// auto-update outcomes against real GitHub Releases (existing manual
-// caveat — see TESTING.md).
+// error-handling.test.mjs/focus-mode.test.mjs. What's deliberately NOT
+// checked here: real OS-locale detection (machine-dependent) and actual
+// network-backed auto-update outcomes against real GitHub Releases
+// (existing manual-testing caveat).
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 // A separate port from the other CDP test files (9422/9423/9424) — node:test
@@ -80,7 +79,7 @@ async function waitForDebuggerUrl(timeoutMs) {
 
 // `node_modules/.bin/electron` is itself a Node wrapper script that spawns
 // the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it (see LESSONS.md) — a plain `child.kill()` on
+// termination signals to it — a plain `child.kill()` on
 // that wrapper doesn't reliably take the real Electron process (and its own
 // Renderer/GPU/Utility helper processes) down with it, especially under
 // SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned
@@ -132,8 +131,10 @@ before(async () => {
     })()
   `);
   // Deterministic starting language regardless of the host OS's locale —
-  // see LESSONS.md for why this has to go through the renderer's own
-  // switchLocale(), not window.api.saveSettings() directly.
+  // this has to go through the renderer's own
+  // switchLocale(), not window.api.saveSettings() directly, since the latter
+  // only updates main.js's own state, not the already-running renderer's
+  // `t` binding.
   await evaluate(`__mod.switchLocale('en'); true`);
 });
 
@@ -180,7 +181,7 @@ async function iconButtonsWithoutSvg() {
 // silently disappeared on every app startup (any button whose translatable
 // text sat directly on the <button> rather than a wrapping <span>). Found
 // via a user report ("icons seem to be missing"), not by any existing
-// test — no test checked DOM structure like this before. See LESSONS.md.
+// test — no test checked DOM structure like this before.
 test('every icon-bearing toolbar button still has its icon after startup', async () => {
   assert.deepEqual(await iconButtonsWithoutSvg(), []);
 });
@@ -253,7 +254,7 @@ test('changing the default grid-columns setting round-trips into settings.json',
 // saveSettingsPatch() in renderer.js replaces its whole `currentSettings`
 // with whatever save-settings returns — so any settings change silently
 // dropped those fields, only visible once something re-read them (the
-// version text, next time Options was rebuilt). See LESSONS.md.
+// version text, next time Options was rebuilt).
 test('the version text survives a settings change (regression: save-settings used to drop it)', async () => {
   await evaluate(`
     (() => {
@@ -296,7 +297,7 @@ test('switching language in Options changes both the dialog itself and static to
   // the new selection too, not just the surrounding text — switchLocale()
   // used to rebuild the dialog before the (deliberately un-awaited) settings
   // save resolved, so the picker briefly kept showing the old language even
-  // though everything else had already switched. See LESSONS.md.
+  // though everything else had already switched.
   const selectedLanguage = await evaluate(`document.getElementById('options-language-select')?.value`);
   assert.equal(selectedLanguage, 'de');
 
@@ -327,11 +328,12 @@ test('the auto-update toggle persists to settings.json', async () => {
 });
 
 // package.json's repository.url used to be the literal TODO-owner
-// placeholder (see CLAUDE.md/deriveRepositoryUrl() in main.js) — the "View
+// placeholder (see deriveRepositoryUrl() in main.js) — the "View
 // on GitHub" button stayed hidden until that was fixed, self-correcting
 // with no code change needed. Now that a real URL is set, this test flips
 // to the opposite assertion: the button appears and points at the real
-// repo. (This is the flip that comment predicted — see GITHUB.md.)
+// repo — this is the flip that was already anticipated when the
+// placeholder-hiding behavior was first written.
 test('the "View on GitHub" button appears and links to the real repository once repository.url is a real URL', async () => {
   const settings = await evaluate(`window.api.getSettings()`);
   assert.equal(settings.repositoryUrl, 'https://github.com/sehnot/pageboard');
@@ -368,7 +370,7 @@ test('"Licenses & acknowledgments" opens a dialog listing all dependencies with 
 
   // Matches src/acknowledgments.mjs — pdfjs-dist is Apache-2.0, not MIT like
   // the rest (verified against its actual package.json when the module was
-  // written, see CLAUDE.md/LESSONS.md); this test would catch that detail
+  // written); this test would catch that detail
   // silently regressing to "MIT" by copy-paste later.
   assert.equal(entries.length, 5);
   assert.ok(entries.every((e) => e.href?.startsWith('https://')), 'every entry should link somewhere real');

@@ -10,7 +10,7 @@ import os from 'node:os';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
@@ -20,10 +20,9 @@ import electronBinPath from 'electron';
 // exercised at the model/store level (bypassing the actual DOM): page
 // selection via real clicks, keyboard shortcuts via real KeyboardEvents,
 // toolbar action buttons via real .click(), and closeDocument()'s
-// dialog-free (non-dirty) branch. CLAUDE.md's "Headless UI verification"
-// section already names these as automatable; this file is the coverage
-// that was missing. closeDocument()'s dirty branch is deliberately NOT
-// covered — see the comment above that test further down.
+// dialog-free (non-dirty) branch — all of it automatable; this file is the
+// coverage that was missing. closeDocument()'s dirty branch is deliberately
+// NOT covered — see the comment above that test further down.
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const testFilesDir = path.join(projectRoot, 'pdf-files', 'test-files');
@@ -75,7 +74,7 @@ async function waitForDebuggerUrl(timeoutMs) {
   throw new Error('Electron window did not register for CDP in time');
 }
 
-// See LESSONS.md — node_modules/.bin/electron is itself a wrapper that
+// node_modules/.bin/electron is itself a wrapper that
 // spawns the real Electron binary as a separate child process; a plain
 // .kill() doesn't reliably take the whole tree down with it.
 function killElectron(child) {
@@ -87,8 +86,8 @@ function killElectron(child) {
   }
 }
 
-// Real mouse clicks (unlike wheel events, see LESSONS.md) work reliably via
-// the CDP Input domain.
+// Real mouse clicks (unlike wheel events, which reliably hang over CDP)
+// work reliably via the CDP Input domain.
 async function clickAt(x, y, { modifiers = 0 } = {}) {
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1, modifiers });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, modifiers });
@@ -99,7 +98,7 @@ async function clickAt(x, y, { modifiers = 0 } = {}) {
 // Ctrl during a mousedown/mouseup on macOS is that OS's native
 // secondary-click (right-click) convention, and Chromium honors it by not
 // synthesizing a 'click' DOM event at all (mousedown/mouseup still fire,
-// confirmed via a standalone diagnostic — see LESSONS.md) — so a
+// confirmed via a standalone diagnostic) — so a
 // CDP-dispatched Ctrl+click never reaches handlePageClick() on this
 // platform, even though the app's own handler checks
 // `event.metaKey || event.ctrlKey` and Ctrl+click is the correct modifier
@@ -114,8 +113,8 @@ function centerOf(rect) {
 // renderer (same technique focus-mode.test.mjs uses for WheelEvent) rather
 // than CDP's Input.dispatchKeyEvent — simpler to get modifier keys exactly
 // right, and avoids relying on a CDP input path this project hasn't
-// already verified for keyboard (only clicks are confirmed reliable, see
-// LESSONS.md). Exercises the exact same `window.addEventListener('keydown',
+// already verified for keyboard (only clicks are confirmed reliable).
+// Exercises the exact same `window.addEventListener('keydown',
 // ...)` listener a real key press would.
 async function pressKey(key, { ctrlKey = false, shiftKey = false } = {}) {
   await evaluate(`
@@ -132,8 +131,8 @@ async function pressKey(key, { ctrlKey = false, shiftKey = false } = {}) {
 // which matches getFlatPages()' document-then-page order in renderer.js, so
 // index N here corresponds to the Nth page across all open documents.
 // Deliberately doesn't capture rects up front: a document column can be
-// taller than the Electron window (800px tall by default — see CLAUDE.md's
-// "Environment gotchas"), so a slot's getBoundingClientRect() computed once
+// taller than the Electron window (800px tall by default), so a slot's
+// getBoundingClientRect() computed once
 // here can point outside the actually-visible viewport, and a CDP-
 // synthesized click at that stale coordinate silently hits nothing. See
 // clickPage() below, which re-measures only after scrolling into view.
@@ -407,8 +406,7 @@ test('keyboard shortcuts are suppressed while a modal dialog is open, and Escape
 // non-writable/non-configurable), so it can't be stubbed from the renderer
 // side either — an attempted assignment silently no-ops instead of
 // throwing, which surfaced as an inexplicable CDP timeout rather than a
-// clear error. See LESSONS.md and CLAUDE.md's "Headless UI verification"
-// section, which already documented this exact dialog as non-automatable.
+// clear error — this exact dialog is documented as non-automatable.
 test('closeDocument() removes a non-dirty document immediately, without any dialog', async () => {
   // Open a fresh document rather than relying on one of the two opened in
   // before() — earlier tests in this file rotate/duplicate/delete pages on

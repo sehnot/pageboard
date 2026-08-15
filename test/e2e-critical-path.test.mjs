@@ -10,7 +10,7 @@ import os from 'node:os';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
@@ -20,16 +20,15 @@ import { PDFDocument } from 'pdf-lib';
 // A single, targeted E2E test for exactly the
 // app's most critical path — open → edit → save — which, if broken, would
 // make the app unusable for every single user. Uses the same spawn-+-CDP
-// technique as test/error-handling.test.mjs (see there and CLAUDE.md
-// "Headless UI verification") instead of Playwright: the technique already
-// exists, is proven, and covers real main.js behavior
+// technique as test/error-handling.test.mjs instead of Playwright: the
+// technique already exists, is proven, and covers real main.js behavior
 // (filesystem access) that plain node:test otherwise couldn't reach — a
 // second browser-automation library would just add maintenance overhead
 // (this is a hobby project — minimal maintenance is a stated goal) without
 // covering anything this technique doesn't already cover.
 //
 // Works on a fresh copy from pdf-files/test-files/ in an mkdtemp scratch
-// directory, not pdf-files/test-files-edit/ — per CLAUDE.md/repo
+// directory, not pdf-files/test-files-edit/ — per repo
 // conventions, the latter is manual-testing scratch space whose contents
 // can be "consumed" at any time; an automated test needs a reproducible
 // starting state.
@@ -91,7 +90,7 @@ async function waitForDebuggerUrl(timeoutMs) {
 
 // `node_modules/.bin/electron` is itself a Node wrapper script that spawns
 // the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it (see LESSONS.md) — a plain `child.kill()` on
+// termination signals to it — a plain `child.kill()` on
 // that wrapper doesn't reliably take the real Electron process (and its own
 // Renderer/GPU/Utility helper processes) down with it, especially under
 // SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned
@@ -162,7 +161,7 @@ test('critical path: open → rotate + delete a page → save lands correctly on
     path.join(projectRoot, 'pdf-files', 'test-files', '027-cropped-rotated-scaled', 'cropped-rotated-scaled.pdf'),
     filePath,
   );
-  // fs.copyFile carries over the source's file mode (see LESSONS.md) —
+  // fs.copyFile carries over the source's file mode —
   // pdf-files/test-files/ is deliberately chmod 444, so the copy would
   // otherwise also be read-only and the save step below would fail at the
   // filesystem level.

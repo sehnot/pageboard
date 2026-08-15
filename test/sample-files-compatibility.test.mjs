@@ -10,7 +10,7 @@ import os from 'node:os';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
@@ -93,7 +93,7 @@ async function waitForDebuggerUrl(timeoutMs) {
 
 // `node_modules/.bin/electron` is itself a Node wrapper script that spawns
 // the real Electron binary as a SEPARATE child process and only relays
-// termination signals to it (see LESSONS.md) — a plain `child.kill()` on
+// termination signals to it — a plain `child.kill()` on
 // that wrapper doesn't reliably take the real Electron process (and its own
 // Renderer/GPU/Utility helper processes) down with it, especially under
 // SIGTERM's graceful-shutdown ambiguity. Left unfixed, those orphaned

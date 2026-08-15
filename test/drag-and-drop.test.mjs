@@ -10,16 +10,15 @@ import os from 'node:os';
 // of the platform binary itself — Electron.app/.../Electron on macOS,
 // electron.exe on Windows, no .bin wrapper script or shell involved. Using
 // this instead of node_modules/.bin/electron[.cmd] sidesteps a real
-// Windows-only bug found via this project's own CI (see LESSONS.md):
+// Windows-only bug found via this project's own CI:
 // spawning a .cmd file directly (without `shell: true`) fails with
 // `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
 // were a binary.
 import electronBinPath from 'electron';
 
-// Covers native HTML5 drag & drop (see CLAUDE.md "Drag & drop
-// internals") via real DragEvents with a real DataTransfer — the technique
-// CLAUDE.md already names as automatable ("dispatch real DragEvents with a
-// new DataTransfer() at the right clientX/clientY") but that had no actual
+// Covers native HTML5 drag & drop via real DragEvents with a real
+// DataTransfer — dispatching real DragEvents with a new DataTransfer() at
+// the right clientX/clientY is automatable, but had no actual
 // test coverage yet. Two independent drag mechanisms are covered: dragging
 // a page (or a multi-selection of pages) between/within documents, and
 // dragging a whole document's section header to reorder it among its
@@ -75,7 +74,7 @@ async function waitForDebuggerUrl(timeoutMs) {
   throw new Error('Electron window did not register for CDP in time');
 }
 
-// See LESSONS.md — node_modules/.bin/electron is itself a wrapper that
+// node_modules/.bin/electron is itself a wrapper that
 // spawns the real Electron binary as a separate child process; a plain
 // .kill() doesn't reliably take the whole tree down with it.
 function killElectron(child) {
@@ -120,8 +119,8 @@ async function centerOfScrolledIntoView(selector) {
 // Runs a full dragstart -> dragover -> drop -> dragend sequence against a
 // single real DataTransfer, entirely inside one Runtime.evaluate call so
 // there's no gap where the app's own dragend/cleanup logic could race
-// against a separate round-trip. Mirrors CLAUDE.md's documented technique:
-// real DragEvents with a real DataTransfer at explicit clientX/clientY.
+// against a separate round-trip: real DragEvents with a real DataTransfer
+// at explicit clientX/clientY.
 async function dragAndDrop(sourceSelector, dropClientX, dropClientY) {
   return evaluate(`
     (() => {

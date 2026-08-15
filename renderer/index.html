@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <!-- No remote content is ever loaded (see CLAUDE.md architecture notes) —
+    <!-- No remote content is ever loaded —
          this is a second layer on top of contextIsolation/sandbox, mainly to
          cap what an exploited renderer could do: connect-src 'self' removes
          any exfiltration channel, script-src 'self' blocks injected remote
@@ -20,7 +20,7 @@
          then consistently means the actually rendered size including
          padding — without this, e.g. the sticky label in Canvas mode would
          appear wider than the page below it despite an exactly matching
-         width set, due to its own `padding` — see LESSONS.md. */
+         width set, due to its own `padding`. */
       *,
       *::before,
       *::after {
@@ -244,8 +244,7 @@
         /* Custom properties instead of fixed px values: renderer.js keeps
            them in sync with `bakedZoom` via applyBakedSizes(), so spacing
            grows along with the pages during the sharpening re-render
-           instead of snapping back to its base size abruptly (see
-           LESSONS.md). */
+           instead of snapping back to its base size abruptly. */
         gap: var(--column-gap, 16px);
         width: max-content;
         /* Centers the row of documents within the visible area as long as
@@ -466,7 +465,7 @@
          would keep the (zoomed-along, and therefore huge at a high zoom
          level) layout width of the hidden columns/sections, so the focused
          page wouldn't be centered but would sit somewhere on the left in a
-         huge invisible empty space (see LESSONS.md). `display: none` lets
+         huge invisible empty space. `display: none` lets
          the layout collapse onto the one page; `scrollIntoView()` in
          toggleFocusMode() then centers it within exactly that collapsed
          layout. */
@@ -487,7 +486,7 @@
          (unlike Canvas' flexbox, which has no concept of empty tracks and
          automatically shrinks to the one visible piece of content).
          `!important` is needed to override the inline-set column count
-         (higher specificity than a normal class rule). See LESSONS.md. */
+         (higher specificity than a normal class rule). */
       .focus-active .grid-pages {
         grid-template-columns: none !important;
       }
