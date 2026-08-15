@@ -1,25 +1,39 @@
 name: Release
 
 # Runs on every push of a "v*" tag (e.g. v1.0.0) and builds on both
-# platforms (Concept 5.4: the Mac build has to be built on Mac, the Windows
-# build on Windows — no cross-compiling). electron-builder --publish always
-# uploads the finished artifacts directly as a GitHub release.
+# platforms (the Mac build has to be built on Mac, the Windows build on
+# Windows — no cross-compiling).
 #
-# Code signing/notarization is deliberately optional (see CLAUDE.md, Phase
-# 16): without the secrets below, electron-builder automatically builds
+# Two-phase, not electron-builder --publish: each platform's `build` job
+# only builds locally (electron-builder --publish never) and uploads its
+# installer files as a plain workflow artifact; a single `publish` job,
+# which needs both builds, then creates ONE GitHub Release and attaches
+# both platforms' assets to it in one atomic `gh release create` call.
+#
+# This replaces an earlier attempt that let each platform's job run
+# `electron-builder --publish always` directly. That created a SEPARATE
+# draft release per job even with the matrix forced sequential
+# (max-parallel: 1) — electron-builder's GitHub publish provider doesn't
+# reuse an existing DRAFT release from an earlier job/run, so the second
+# job always created its own duplicate rather than finding the first job's
+# release. Found for real on the actual v1.0.0 release attempt, twice (see
+# LESSONS.md) — a single job that owns the one release call sidesteps the
+# whole class of problem instead of trying to coordinate multiple
+# electron-builder publish invocations.
+#
+# Code signing/notarization is deliberately optional (see CLAUDE.md):
+# without the secrets below, electron-builder automatically builds
 # unsigned (users see Gatekeeper/SmartScreen warnings); once certificates
-# exist, setting the secrets in the repo (Settings → Secrets and variables →
-# Actions) is enough — this file doesn't need to change for that.
+# exist, setting the secrets in the repo (Settings → Secrets and variables
+# → Actions) is enough — this file doesn't need to change for that.
 on:
   push:
     tags:
       - 'v*'
 
-# The repo's default GITHUB_TOKEN permission is read-only (Settings ->
-# Actions -> General -> Workflow permissions) — electron-builder --publish
-# always needs write access to actually create the GitHub Release and
-# upload assets to it, same class of issue ci.yml already hit once for its
-# own (since-disabled) implicit publish attempt.
+# Needed for the publish job's `gh release create` — the repo's default
+# GITHUB_TOKEN permission is read-only (Settings -> Actions -> General ->
+# Workflow permissions).
 permissions:
   contents: write
 
@@ -27,7 +41,6 @@ jobs:
   build:
     strategy:
       fail-fast: false
-      max-parallel: 1 # sequential, not parallel — see the comment below
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -40,18 +53,9 @@ jobs:
 
       - run: npm ci
 
-      # electron-builder creates the GitHub Release for this tag if it
-      # doesn't see one yet, then uploads its own platform assets to it.
-      # Running both matrix jobs in parallel raced: neither saw the
-      # other's not-yet-created release, so each created its own separate
-      # (broken, mistagged) draft — found for real on the v1.0.0 release
-      # (see LESSONS.md). max-parallel: 1 above forces them sequential:
-      # whichever runs first creates the real release, the second finds
-      # it and adds to it.
-      - name: Build & publish
-        run: npx electron-builder --publish always
+      - name: Build (installer only, no publish — the publish job handles that)
+        run: npx electron-builder --${{ matrix.os == 'macos-latest' && 'mac' || 'win' }} --publish never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Prevents electron-builder from looking for a local keychain
           # identity on CI runners (never present there anyway) —
           # regardless of whether signing via CSC_LINK happens below.
@@ -65,3 +69,31 @@ jobs:
           # Windows: code-signing certificate (.pfx, base64-encoded)
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+
+      # Only the actual release-worthy files — not the unpacked app
+      # directories (dist/mac-arm64/, dist/win-unpacked/), which are large
+      # and not something anyone downloads directly.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: |
+            dist/*.dmg
+            dist/*.exe
+            dist/*.blockmap
+            dist/*.yml
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release (draft) with both platforms' assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" --title "${{ github.ref_name }}" --draft --generate-notes
