@@ -5,6 +5,16 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
+// The `electron` package's main entry, when required/imported from a plain
+// Node context (not Electron's own runtime), resolves to the absolute path
+// of the platform binary itself — Electron.app/.../Electron on macOS,
+// electron.exe on Windows, no .bin wrapper script or shell involved. Using
+// this instead of node_modules/.bin/electron[.cmd] sidesteps a real
+// Windows-only bug found via this project's own CI (see LESSONS.md):
+// spawning a .cmd file directly (without `shell: true`) fails with
+// `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
+// were a binary.
+import electronBinPath from 'electron';
 
 // Error handling & robustness lives mostly in main.js (IPC,
 // filesystem) and renderer.js (pdf.js parsing, toast UI) — neither
@@ -98,12 +108,6 @@ function killElectron(child) {
 }
 
 before(async () => {
-  const electronBin = path.join(
-    projectRoot,
-    'node_modules',
-    '.bin',
-    process.platform === 'win32' ? 'electron.cmd' : 'electron',
-  );
   // Explicitly remove ELECTRON_RUN_AS_NODE instead of just trusting the
   // ambient environment — if the variable is set in the calling shell (e.g.
   // a VS Code integrated terminal, see LESSONS.md), Electron would
@@ -118,7 +122,7 @@ before(async () => {
   // them race on the same settings.json).
   userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-error-cases-userdata-'));
   electronProcess = spawn(
-    electronBin,
+    electronBinPath,
     ['.', `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${userDataDir}`],
     // `detached: true` puts this whole process tree in its own process
     // group — see the comment on killElectron() below for why that matters.
@@ -260,41 +264,67 @@ test(
   },
 );
 
-test('saving to a read-only directory: toast, document stays marked as unsaved', async () => {
-  const result = await openFiles([fixtureA]);
-  assert.equal(result.addedCount <= 1, true); // may already be open from a previous test
+test(
+  'saving to a read-only directory: toast, document stays marked as unsaved',
+  // Git tracks only the executable bit, not full permission modes — a
+  // chmod 444 set locally on pdf-files/test-files/ (see CLAUDE.md, repo
+  // conventions) does not survive `actions/checkout` on CI, so this test
+  // used to rely on repo-fixture permissions that only actually held on a
+  // machine where someone had chmod'd them by hand. Locks its own scratch
+  // copy instead, same pattern as the "undeletable" directory test below.
+  // Directory write-permission via chmod is POSIX-specific (see the
+  // read-permission test above for the same Windows-ACL reasoning).
+  { skip: process.platform === 'win32' },
+  async () => {
+    const lockedDir = path.join(tmpDir, 'readonly-save');
+    await fs.mkdir(lockedDir);
+    const filePath = path.join(lockedDir, 'pdflatex-4-pages.pdf');
+    await fs.copyFile(fixtureA, filePath);
 
-  const originalBytesBefore = await fs.readFile(fixtureA);
+    const result = await openFiles([filePath]);
+    assert.equal(result.addedCount, 1);
 
-  const outcome = await evaluate(`
-    (async () => {
-      const doc = __mod.store.documents.find(d => d.displayName === 'pdflatex-4-pages.pdf');
-      __mod.applyPageAction('rotate-right', [doc.pages[0].id]); // forces dirty
-      await __mod.saveDocuments([doc]);
-      return { dirty: doc.dirty };
-    })()
-  `);
-  const toast = await readToast();
+    const originalBytesBefore = await fs.readFile(filePath);
 
-  // pdf-files/test-files/ is deliberately chmod 444 (see CLAUDE.md, repo
-  // conventions) — the write attempt must fail server-side (main.js).
-  assert.equal(outcome.dirty, true);
-  assert.match(toast.text, /^Failed to save: pdflatex-4-pages\.pdf$/);
+    await fs.chmod(lockedDir, 0o555); // read+execute, no write — locks after the copy/open above
 
-  // Regression coverage for the atomic write (main.js writeFileAtomic()):
-  // main.js writes to a `.pageboard-tmp` sibling first, then renames it into
-  // place — a failure at either step must leave the original completely
-  // untouched and not leak a stray temp file into the (read-only, so this
-  // directory listing itself is the only way to check) directory.
-  const dirEntries = await fs.readdir(path.dirname(fixtureA));
-  assert.equal(
-    dirEntries.some((name) => name.endsWith('.pageboard-tmp')),
-    false,
-    'no leftover .pageboard-tmp file should remain after a failed save',
-  );
-  const originalBytesAfter = await fs.readFile(fixtureA);
-  assert.deepEqual(originalBytesAfter, originalBytesBefore, 'the original file must be byte-for-byte unchanged');
-});
+    // Matched by exact filePath, not displayName: fixtureA (same basename,
+    // different — unlocked — path) is already open in the shared store from
+    // an earlier test in this file ("mixed open operation"), so a
+    // displayName match could silently grab that wrong, unlocked document
+    // instead of this test's own scratch copy. That mismatch was invisible
+    // locally, where pdf-files/test-files/ also happens to be chmod 444 by
+    // hand, but surfaced for real on CI, where it isn't (see LESSONS.md).
+    const outcome = await evaluate(`
+      (async () => {
+        const doc = __mod.store.documents.find(d => d.filePath === ${JSON.stringify(filePath)});
+        __mod.applyPageAction('rotate-right', [doc.pages[0].id]); // forces dirty
+        await __mod.saveDocuments([doc]);
+        return { dirty: doc.dirty };
+      })()
+    `);
+    const toast = await readToast();
+
+    await fs.chmod(lockedDir, 0o755); // hand it back for cleanup in after()
+
+    assert.equal(outcome.dirty, true);
+    assert.match(toast.text, /^Failed to save: pdflatex-4-pages\.pdf$/);
+
+    // Regression coverage for the atomic write (main.js writeFileAtomic()):
+    // main.js writes to a `.pageboard-tmp` sibling first, then renames it
+    // into place — a failure at either step must leave the original
+    // completely untouched and not leak a stray temp file into the
+    // directory.
+    const dirEntries = await fs.readdir(lockedDir);
+    assert.equal(
+      dirEntries.some((name) => name.endsWith('.pageboard-tmp')),
+      false,
+      'no leftover .pageboard-tmp file should remain after a failed save',
+    );
+    const originalBytesAfter = await fs.readFile(filePath);
+    assert.deepEqual(originalBytesAfter, originalBytesBefore, 'the original file must be byte-for-byte unchanged');
+  },
+);
 
 test(
   'deleting an empty document with no write permission on the directory: toast, document stays in the store',

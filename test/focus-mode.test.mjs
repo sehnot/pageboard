@@ -5,6 +5,16 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
+// The `electron` package's main entry, when required/imported from a plain
+// Node context (not Electron's own runtime), resolves to the absolute path
+// of the platform binary itself — Electron.app/.../Electron on macOS,
+// electron.exe on Windows, no .bin wrapper script or shell involved. Using
+// this instead of node_modules/.bin/electron[.cmd] sidesteps a real
+// Windows-only bug found via this project's own CI (see LESSONS.md):
+// spawning a .cmd file directly (without `shell: true`) fails with
+// `spawn EINVAL`, since CreateProcess can't execute a batch script as if it
+// were a binary.
+import electronBinPath from 'electron';
 
 // Focus mode (reworked based on user feedback after the initial
 // implementation, see CLAUDE.md "Renderer internals" and LESSONS.md) had no automated
@@ -153,12 +163,6 @@ function centerOf(rect) {
 }
 
 before(async () => {
-  const electronBin = path.join(
-    projectRoot,
-    'node_modules',
-    '.bin',
-    process.platform === 'win32' ? 'electron.cmd' : 'electron',
-  );
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
 
@@ -167,7 +171,7 @@ before(async () => {
   // node:test can run concurrently.
   userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pageboard-focus-mode-userdata-'));
   electronProcess = spawn(
-    electronBin,
+    electronBinPath,
     ['.', `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${userDataDir}`],
     // `detached: true` puts this whole process tree in its own process
     // group — see the comment on killElectron() above for why that matters.
@@ -226,8 +230,14 @@ test('double-click in Canvas mode enlarges the page to fill the frame and center
   // CANVAS_COLUMN_WIDTH) — a before/after width comparison would therefore
   // be misleading. Height, on the other hand, isn't stretched (the flex
   // main axis, follows the actual render resolution) and is thus the
-  // reliable growth signal.
-  assert.ok(focused.height > before_.height * 1.3, 'page should be noticeably taller in focus mode than before');
+  // reliable growth signal. The growth ratio is height-bound here (see
+  // FOCUS_MODE_FILL_RATIO below) and thus a function of window.innerHeight
+  // alone, which isn't this test's to control — a real run measured 1.2
+  // (1000x700 CI-like window) up to 1.4 (1200x800 local, minus title-bar
+  // chrome eating into innerHeight). 1.15 stays well clear of that observed
+  // range on the low end while still catching a real "barely moved" bug
+  // (ratio ~1.0), see LESSONS.md.
+  assert.ok(focused.height > before_.height * 1.15, 'page should be noticeably taller in focus mode than before');
   // Fill the frame: close to the window size on at least one axis
   // (FOCUS_MODE_FILL_RATIO = 0.92 in renderer.js, tolerated more generously here).
   assert.ok(focused.width >= windowSize.w * 0.6 || focused.height >= windowSize.h * 0.6, 'page should approximately fill the frame');
@@ -287,9 +297,9 @@ test('a second double-click restores the previous zoom level/position', async ()
   await new Promise((r) => setTimeout(r, 600));
 
   const focused = await rectOf('.page-slot.focused');
-  // Compare height instead of width — see the comment in the first test
-  // case (width is already set to the column width via flex-stretch beforehand).
-  assert.ok(focused.height > before_.height * 1.3, 'page should be taller in focus mode');
+  // Compare height instead of width — see the comment (and the threshold
+  // rationale) in the first test case.
+  assert.ok(focused.height > before_.height * 1.15, 'page should be taller in focus mode');
 
   const centerFocused = centerOf(focused);
   await realDoubleClick(centerFocused.x, centerFocused.y);
@@ -316,8 +326,19 @@ test('manually zooming in focus mode exits it without jumping to the first page 
 
   // Focus the third (last) document — a jump to the first page would be
   // clearly distinguishable here from correctly "staying in place", unlike
-  // with the first document.
+  // with the first document. Unlike the earlier tests in this file (which
+  // all target the FIRST page-slot, already visible at scrollLeft 0), the
+  // third document's column isn't guaranteed to be scrolled into view at
+  // this point — explicitly scroll to it first, otherwise its computed
+  // "center" coordinate could fall outside the actual viewport, and a real
+  // click dispatched there hits nothing.
   const thirdDocId = await evaluate(`__mod.store.documents[2].id`);
+  await evaluate(`
+    document.querySelector('.document-container[data-document-id="${thirdDocId}"] .page-slot')
+      .scrollIntoView({ block: 'center', inline: 'center' });
+    true;
+  `);
+  await new Promise((r) => setTimeout(r, 200));
   const before_ = await rectOf(`.document-container[data-document-id="${thirdDocId}"] .page-slot`);
   const c = centerOf(before_);
   await realDoubleClick(c.x, c.y);
