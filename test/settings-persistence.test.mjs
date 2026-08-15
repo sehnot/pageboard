@@ -74,6 +74,26 @@ async function waitForDebuggerUrl(timeoutMs) {
   throw new Error('Electron window did not register for CDP in time');
 }
 
+// The CDP target (and a successful Runtime.enable) can exist before
+// index.html has actually finished its own initial navigation — a relative
+// `import('./renderer.js')` attempted in that window briefly fails with
+// "Failed to resolve module specifier" (observed on a real windows-latest
+// CI run). Retry instead of treating one early attempt as authoritative.
+async function importRendererModule(ws, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      await evaluate(ws, `(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
+      return;
+    } catch (err) {
+      lastError = err;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  throw lastError;
+}
+
 // node_modules/.bin/electron is itself a wrapper that
 // spawns the real Electron binary as a separate child process; a plain
 // .kill() doesn't reliably take the whole tree down with it.
@@ -103,7 +123,7 @@ async function launchPageBoard() {
     ws.addEventListener('error', reject, { once: true });
   });
   await send(ws, 'Runtime.enable');
-  await evaluate(ws, `(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
+  await importRendererModule(ws);
 
   return { electronProcess, ws };
 }

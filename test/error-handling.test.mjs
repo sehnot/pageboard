@@ -84,6 +84,26 @@ async function waitForDebuggerUrl(timeoutMs) {
   throw new Error('Electron window did not register for CDP in time');
 }
 
+// The CDP target (and a successful Runtime.enable) can exist before
+// index.html has actually finished its own initial navigation — a relative
+// `import('./renderer.js')` attempted in that window briefly fails with
+// "Failed to resolve module specifier" (observed on a real windows-latest
+// CI run). Retry instead of treating one early attempt as authoritative.
+async function importRendererModule(timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      await evaluate(`(async () => { globalThis.__mod = await import('./renderer.js'); return true; })()`);
+      return;
+    } catch (err) {
+      lastError = err;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  throw lastError;
+}
+
 // `node_modules/.bin/electron` is itself a Node wrapper script that spawns
 // the real Electron binary as a SEPARATE child process and only relays
 // termination signals to it — a plain `child.kill()` on
@@ -141,12 +161,7 @@ before(async () => {
   // once here and anchor it on the page's globalThis, so all tests in this
   // file share the same running store (no Electron restart needed between
   // individual test cases).
-  await evaluate(`
-    (async () => {
-      globalThis.__mod = await import('./renderer.js');
-      return true;
-    })()
-  `);
+  await importRendererModule();
 
   // Force English regardless of the host OS's locale (the app now defaults
   // to the OS-detected language, see src/i18n.mjs matchLocale() — without
