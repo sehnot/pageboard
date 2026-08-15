@@ -79,6 +79,23 @@ User documentation (how to actually use the app) lives in
 - Packaged `.dmg`/`.exe` builds via `electron-builder`, optional
   auto-update via GitHub Releases
 
+## Installing a downloaded build
+
+The `.dmg`/`.exe` builds aren't code-signed yet, so macOS and Windows both
+flag them as coming from an unidentified source. That's expected, not a
+broken download — one extra step gets you past it:
+
+- **macOS**: "'PageBoard.app' is damaged and can't be opened" is Gatekeeper's
+  generic message for any unsigned, downloaded app, not an actual integrity
+  problem. Fix in Terminal:
+  ```bash
+  xattr -cr /Applications/PageBoard.app
+  ```
+- **Windows**: SmartScreen shows "Windows protected your PC" — click
+  **More info**, then **Run anyway**. Alternatively, right-click the
+  installer → Properties → check **Unblock** → OK before running it, or run
+  `Unblock-File .\PageBoard.Setup.x.x.x.exe` in PowerShell.
+
 ## Build it yourself
 
 There's no packaged download yet, but getting a running app out of this

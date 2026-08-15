@@ -1,5 +1,24 @@
 # Getting Started
 
+## First launch: security warnings on a downloaded build
+
+PageBoard's macOS and Windows builds aren't code-signed yet, so the first
+time you launch a downloaded copy, your OS will flag it as coming from an
+unidentified source. This is expected — it's not a corrupted download —
+and only needs to be dealt with once per installed copy.
+
+- **macOS**: if you see "'PageBoard.app' is damaged and can't be opened,"
+  that's Gatekeeper's standard message for any unsigned, downloaded app —
+  not a real integrity problem. Open Terminal and run:
+  ```bash
+  xattr -cr /Applications/PageBoard.app
+  ```
+  Then launch it normally.
+- **Windows**: if SmartScreen shows "Windows protected your PC," click
+  **More info**, then **Run anyway**. If you'd rather clear the warning
+  before running the installer at all, right-click it → Properties → check
+  **Unblock** → OK.
+
 ## Opening PDFs
 
 There are three ways to open PDFs in PageBoard:
