@@ -137,6 +137,33 @@ test('deleting a page leaves its neighbours\' canvases untouched', async () => {
   }
 });
 
+test('rendering a slot twice is a no-op, not a second rasterization', async () => {
+  await stampCanvases();
+  const before = await survivingStamps();
+
+  // Nothing guarantees renderPageIntoSlot() runs once per slot: the
+  // IntersectionObserver can still hold a queued task for a slot that a
+  // direct call already rendered. Unguarded, that second run swapped in an
+  // identical canvas — wasted work in the app, and here it silently replaced
+  // the element under observation.
+  //
+  // This reproduces it deterministically. It surfaced as a Windows-only CI
+  // failure of the test below, because the observer stays paused in an
+  // unfocused window (macOS) and actually fires in a visible one.
+  await session.evaluate(`
+    Promise.all(
+      [...document.querySelectorAll('#canvas-view .page-slot')]
+        .map((slot) => __mod.renderPageIntoSlot(slot)),
+    ).then(() => true)
+  `);
+
+  assert.deepEqual(
+    await survivingStamps(),
+    before,
+    'a redundant render should have left every canvas exactly as it was',
+  );
+});
+
 test('undo and redo preserve page identity instead of minting new ids', async () => {
   const originalIds = await pageIds();
   const targetId = originalIds[0];

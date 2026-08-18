@@ -2319,12 +2319,24 @@ async function computeCanvas(page, targetZoom, baseScale) {
 
 async function renderPageIntoSlot(slot) {
   const info = slotRenderInfo.get(slot);
-  // May have been removed from the DOM in the meantime by a full re-render
-  // (e.g. because another document was opened) while the task was still
-  // sitting in the queue.
+  // May have been removed from the DOM in the meantime by a re-render (e.g.
+  // because another document was opened) while the task was still sitting in
+  // the queue.
   if (!info || !slot.isConnected) return;
 
+  // Idempotent on purpose. Nothing guarantees this runs only once per slot:
+  // the observer can still be holding a queued task for a slot that has
+  // meanwhile been rendered by a direct call (which is exactly what the test
+  // harness does, and what any future "render this now" path would do). Left
+  // unguarded, the second run replaces a perfectly good canvas with an
+  // identical one — wasted rasterization in the app, and in a test it
+  // silently swaps out the very element under observation.
+  if (info.renderedKey === info.renderKey && slot.classList.contains('rendered')) return;
+
   const { state, baseScale, page } = info;
+  // Take the slot out of the observer's hands for the duration: without
+  // this, the queued task and this call race to render the same slot.
+  releaseSlot(slot, viewObserverFor(state));
   // Deliberately render at `bakedZoom`, not the current `zoom` target: this
   // function handles a page becoming visible for the first time (e.g. while
   // scrolling), even in the middle of an ongoing zoom gesture. If the
@@ -2339,10 +2351,17 @@ async function renderPageIntoSlot(slot) {
   const canvas = await computeCanvas(page, state.bakedZoom, baseScale);
   if (!slot.isConnected) return;
 
+  // The slot may have been repointed at a different page — or the same page
+  // at a different rotation — while this was rendering. Claiming the result
+  // then would put a stale image on screen.
+  const current = slotRenderInfo.get(slot);
+  if (!current || current.renderKey !== info.renderKey) return;
+
   slot.replaceChildren(canvas);
   slot.style.width = '';
   slot.style.height = '';
   slot.classList.add('rendered');
+  current.renderedKey = current.renderKey;
   syncCanvasColumnHeaderWidth(slot, canvas);
 }
 
@@ -2433,12 +2452,22 @@ function createPageSlot(state, baseScale, doc, page, observer) {
 function refreshPageSlot(state, baseScale, doc, page, slot, observer) {
   const previous = slotRenderInfo.get(slot);
   const key = renderKeyOf(page);
-  slotRenderInfo.set(slot, { state, baseScale, doc, page, renderKey: key });
+  // `renderKey` is what the slot SHOULD show, `renderedKey` what its canvas
+  // actually does. Carrying the latter across is what keeps a still-valid
+  // canvas — losing it here would make renderPageIntoSlot re-render every
+  // slot on every reconcile, i.e. exactly the cost this all avoids.
+  const stillValid = previous?.renderedKey === key && slot.classList.contains('rendered');
+  slotRenderInfo.set(slot, {
+    state,
+    baseScale,
+    doc,
+    page,
+    renderKey: key,
+    renderedKey: stillValid ? key : null,
+  });
   slot.classList.toggle('selected', selectedPageIds.has(page.id));
 
-  if (previous && previous.renderKey === key && slot.classList.contains('rendered')) {
-    return; // canvas still depicts exactly this page — leave it alone
-  }
+  if (stillValid) return; // canvas still depicts exactly this page — leave it alone
 
   if (slot.classList.contains('rendered')) {
     // Rotated (or restored to a different rotation): drop the stale canvas
