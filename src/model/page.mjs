@@ -6,8 +6,17 @@ let nextPageId = 1;
  * between documents — only the owning Document's `pages` array changes.
  */
 export class Page {
-  constructor({ source, sourcePageIndex, rotation = 0 }) {
-    this.id = `page-${nextPageId++}`;
+  /**
+   * `id` is only ever passed by DocumentStore._restore(), to give an
+   * undone/redone page back the identity it had before. Everything else
+   * leaves it out and gets a fresh one. Restoring identity matters because
+   * the renderer reconciles its DOM by page id: with a fresh id per undo,
+   * every page would look new, so every already-rasterized page would be
+   * thrown away and re-rendered on each undo step. It also means the
+   * current selection survives an undo instead of silently emptying.
+   */
+  constructor({ source, sourcePageIndex, rotation = 0, id = null }) {
+    this.id = id ?? `page-${nextPageId++}`;
     this.source = source;
     this.sourcePageIndex = sourcePageIndex;
     this.rotation = rotation;

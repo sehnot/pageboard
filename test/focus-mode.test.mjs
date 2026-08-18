@@ -15,10 +15,16 @@ import { startSession, CDP_PORTS, testFilesDir, VIEWPORT } from './helpers/cdp-s
 //
 // Three files with genuinely different page dimensions from each other (not
 // just different content) — needed to trigger the geometric edge cases this
-// test targets. Verified via pdf-lib before picking these: 004 is plain A4
-// (595x842), 019 is a small non-standard size (243x338), 027 has four
-// internally different page sizes of its own
-// (600x720/450x540/550x420/550x780).
+// test targets. 004 is plain A4 (595x842), 019 is a small non-standard size
+// (243x338), 027 has four internally different page sizes of its own
+// (384x504/288x378/352x294/352x546).
+//
+// Those 027 numbers are its CROPBOX sizes, which is what pdf.js lays out
+// from (`page.view`) and therefore what the app actually renders. They were
+// previously recorded here as 600x720/450x540/550x420/550x780 — that is the
+// MediaBox, i.e. the wrong box for this fixture in particular, whose whole
+// point is that it is cropped. Re-measured via pdf.js
+// (`getViewport({ scale: 1, rotation: 0 })`), the same call renderer.js uses.
 const FOCUS_TEST_FILES = [
   ['004-pdflatex-4-pages', 'pdflatex-4-pages.pdf'],
   ['019-grayscale-image', 'grayscale-image.pdf'],

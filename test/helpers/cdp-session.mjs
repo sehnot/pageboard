@@ -47,6 +47,10 @@ export const CDP_PORTS = {
   settingsPersistence: 9428,
   interaction: 9429,
   dragAndDrop: 9430,
+  cellSize: 9431,
+  reconciliation: 9432,
+  layoutAnimation: 9433,
+  dragPreview: 9434,
 };
 
 // Every CDP-driven test runs against this exact viewport, on every OS.
@@ -364,7 +368,7 @@ export async function startSession({
    * rasterized.
    *
    * Both halves matter. Normally the IntersectionObserver
-   * (createViewObserver() in renderer.js) triggers rasterization as slots near
+   * (viewObserverFor() in renderer.js) triggers rasterization as slots near
    * the viewport — but Chromium silently pauses IntersectionObserver callbacks
    * for an unfocused or occluded window, which a test-spawned window
    * frequently is. Rasterization then never happens, no matter how long a test

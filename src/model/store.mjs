@@ -284,13 +284,22 @@ export class DocumentStore {
     this._notify();
   }
 
+  // Snapshots are plain data, never object references — a restore builds
+  // fresh Document/Page instances from them. The recorded `id`s are what
+  // makes those instances count as the SAME documents and pages afterwards:
+  // the renderer reconciles its DOM by id, so without them every undo step
+  // would look like "all pages replaced" and throw away every already
+  // rasterized page. It also keeps the user's selection meaningful across
+  // an undo.
   _snapshot() {
     return this.documents.map((doc) => ({
+      id: doc.id,
       filePath: doc.filePath,
       displayName: doc.displayName,
       dirty: doc.dirty,
       originalSourceId: doc.originalSource?.id ?? null,
       pages: doc.pages.map((page) => ({
+        id: page.id,
         sourceId: page.source.id,
         sourcePageIndex: page.sourcePageIndex,
         rotation: page.rotation,
@@ -303,12 +312,14 @@ export class DocumentStore {
       const pages = entry.pages.map(
         (p) =>
           new Page({
+            id: p.id,
             source: this._sourceRegistry.get(p.sourceId),
             sourcePageIndex: p.sourcePageIndex,
             rotation: p.rotation,
           }),
       );
       const doc = new Document({
+        id: entry.id,
         filePath: entry.filePath,
         displayName: entry.displayName,
         pages,
