@@ -55,7 +55,7 @@ async function evaluate(ws, expression) {
 // Force-renders every currently-present, not-yet-rasterized `.page-slot` by
 // calling the exported `renderPageIntoSlot()` directly instead of waiting
 // on the IntersectionObserver that normally drives this (see
-// createViewObserver() in renderer.js). This headless/backgrounded window
+// viewObserverFor() in renderer.js). This headless/backgrounded window
 // never gets real OS focus, and Chromium silently pauses
 // IntersectionObserver callbacks for an unfocused/occluded window — normal
 // scroll-triggered rendering would just never happen here, regardless of

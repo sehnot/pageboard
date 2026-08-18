@@ -128,26 +128,45 @@ class RenderQueue {
 
 const renderQueue = new RenderQueue(RENDER_CONCURRENCY);
 const pendingRenders = new WeakMap(); // page-slot element -> render task
-let activeObserver = null;
 
-function createViewObserver(root) {
-  if (activeObserver) {
-    activeObserver.disconnect();
+// One long-lived observer per view, created on first use.
+//
+// It used to be recreated (and the previous one disconnected) on every
+// rebuild, which was fine while every rebuild also threw away every slot.
+// Now that slots survive a store change (see reconcileView), a fresh
+// observer would lose track of the slots it is already watching, so the
+// observer has to outlive the render instead. The flip side is that an
+// IntersectionObserver holds a STRONG reference to everything it observes:
+// a removed slot has to be unobserved explicitly (releaseSlot) or it stays
+// alive — along with its rasterized canvas — for the rest of the session.
+const viewObservers = new WeakMap(); // zoom state -> IntersectionObserver
+
+function viewObserverFor(state) {
+  let observer = viewObservers.get(state);
+  if (!observer) {
+    observer = new IntersectionObserver(
+      (entries, self) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const task = pendingRenders.get(entry.target);
+          if (!task) continue;
+          pendingRenders.delete(entry.target);
+          self.unobserve(entry.target);
+          renderQueue.add(task);
+        }
+      },
+      { root: state.container, rootMargin: '200px', threshold: 0.01 },
+    );
+    viewObservers.set(state, observer);
   }
-  activeObserver = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const task = pendingRenders.get(entry.target);
-        if (!task) continue;
-        pendingRenders.delete(entry.target);
-        activeObserver.unobserve(entry.target);
-        renderQueue.add(task);
-      }
-    },
-    { root, rootMargin: '200px', threshold: 0.01 },
-  );
-  return activeObserver;
+  return observer;
+}
+
+// Detaches a slot that is about to leave the DOM: stops the observer from
+// holding it alive, and drops any render still queued for it.
+function releaseSlot(slot, observer) {
+  observer.unobserve(slot);
+  pendingRenders.delete(slot);
 }
 
 const emptyState = document.getElementById('empty-state');
@@ -426,8 +445,8 @@ function syncDerivedCellSizes() {
 function applyBakedSizes(state) {
   // Sized per page rather than from one shared constant, so a slot occupies
   // exactly the space its page will need — no layout jump when it finally
-  // rasterizes. `slotRenderInfo` may miss: this also runs (via
-  // resetZoomBaking) against the previous build's slots.
+  // rasterizes. Tolerates a `slotRenderInfo` miss: this also runs from the
+  // zoom rebake, against whatever slots happen to be in the DOM.
   for (const slot of state.container.querySelectorAll('.page-slot:not(.rendered)')) {
     const size = slotSizeFor(state, state.baseScale, slotRenderInfo.get(slot)?.page);
     slot.style.width = `${size.width * state.bakedZoom}px`;
@@ -942,22 +961,37 @@ function syncAllColumnsGridWidth(documentIds) {
 // stayed disabled after a drag & drop even though the document was dirty
 // again in the model — a document moved via drag could then no longer be
 // saved again after its first save.
+// Applies one document's dirty state to one header element. Both the
+// add AND the remove direction matter: headers are reused across store
+// changes now, so a dot left behind after a successful save would simply
+// stay there forever — previously the full rebuild disposed of it by
+// accident, by throwing the whole header away.
+function syncHeaderDirtyState(header, doc) {
+  const existingDot = header.querySelector('.dirty-dot');
+  if (doc.dirty && !existingDot) {
+    const dot = document.createElement('span');
+    dot.className = 'dirty-dot';
+    dot.textContent = '●';
+    dot.title = t('sectionHeader.unsavedTitle');
+    header.querySelector('.section-header-name').after(dot);
+  } else if (!doc.dirty && existingDot) {
+    existingDot.remove();
+  }
+
+  const saveButton = header.querySelector('.save-button');
+  saveButton.disabled = !doc.dirty;
+  saveButton.title = doc.dirty ? t('sectionHeader.saveTitle') : t('sectionHeader.saveDisabledTitle');
+}
+
 function syncDirtyDot(documentId) {
   const doc = store.getDocument(documentId);
   if (!doc) return;
+  // Deliberately unscoped: both view trees coexist, and both of their
+  // headers for this document have to stay in sync.
   for (const header of document.querySelectorAll(
     `.document-container[data-document-id="${documentId}"] .section-header`,
   )) {
-    if (doc.dirty && !header.querySelector('.dirty-dot')) {
-      const dot = document.createElement('span');
-      dot.className = 'dirty-dot';
-      dot.textContent = '●';
-      dot.title = t('sectionHeader.unsavedTitle');
-      header.querySelector('.section-header-name').after(dot);
-    }
-    const saveButton = header.querySelector('.save-button');
-    saveButton.disabled = !doc.dirty;
-    saveButton.title = doc.dirty ? t('sectionHeader.saveTitle') : t('sectionHeader.saveDisabledTitle');
+    syncHeaderDirtyState(header, doc);
   }
   updateSaveAllButtonState();
 }
@@ -2163,7 +2197,7 @@ function syncCanvasColumnHeaderWidth(slot, canvas) {
 
 // Placeholder slot: appears exclusively when the entire
 // document contains no more pages — not already when individual pages are
-// removed (the empty/shorter `doc.pages` loop in renderDocumentPages
+// removed (the empty/shorter `doc.pages` loop in reconcileDocumentPages
 // handles that by itself). Dashed border, no text, no click/drag listeners
 // (there's no Page behind it). Still rendered at placeholder size (not
 // 0×0) — otherwise the hit area for computeDropTarget() when dragging pages
@@ -2184,73 +2218,151 @@ function createPlaceholderSlot(state) {
   return placeholder;
 }
 
-function renderDocumentPages(state, baseScale, doc, container, observer) {
-  if (doc.isEmpty) {
-    container.appendChild(createPlaceholderSlot(state));
-    return;
+// Identifies what a slot's rasterized canvas actually depicts. A slot is
+// reusable across a store change as long as this is unchanged; if it
+// differs (the only editable ingredient is rotation), the existing canvas
+// depicts the wrong thing and has to be re-rendered even though the slot
+// itself stays.
+const renderKeyOf = (page) => `${page.id}:${page.rotation}`;
+
+// Queues a slot for (re-)rasterization and hands it to the observer, so the
+// actual render happens once it nears the viewport.
+function scheduleSlotRender(slot, doc, observer) {
+  pendingRenders.set(slot, () =>
+    renderPageIntoSlot(slot).catch((error) => {
+      log(`Rendering failed (${doc.displayName}): ${error}`);
+    }),
+  );
+  observer.observe(slot);
+}
+
+function createPageSlot(state, baseScale, doc, page, observer) {
+  const slot = document.createElement('div');
+  slot.className = 'page-slot';
+  slot.dataset.pageId = page.id;
+  slot.draggable = true;
+  // Listeners resolve the page through slotRenderInfo rather than closing
+  // over it: the slot outlives store changes now, and undo/redo replaces
+  // every Page instance (keeping only its id), so a captured reference
+  // would go stale while the slot on screen stayed perfectly valid.
+  slot.addEventListener('click', (event) => {
+    const current = slotRenderInfo.get(slot)?.page;
+    if (current) handlePageClick(current, event);
+  });
+  slot.addEventListener('dblclick', () => toggleFocusMode(slot));
+  slot.addEventListener('dragstart', (event) => {
+    const current = slotRenderInfo.get(slot)?.page;
+    if (current) startPageDrag(current, event);
+  });
+  slot.addEventListener('dragend', cleanupDrag);
+  slot.addEventListener('contextmenu', (event) => {
+    const current = slotRenderInfo.get(slot)?.page;
+    if (current) handlePageContextMenu(current, event);
+  });
+
+  refreshPageSlot(state, baseScale, doc, page, slot, observer);
+  return slot;
+}
+
+// Brings an existing slot up to date with the current model. Everything
+// here is deliberately cheap and non-destructive unless the render key
+// changed — the whole point of reusing the slot is keeping its canvas.
+function refreshPageSlot(state, baseScale, doc, page, slot, observer) {
+  const previous = slotRenderInfo.get(slot);
+  const key = renderKeyOf(page);
+  slotRenderInfo.set(slot, { state, baseScale, doc, page, renderKey: key });
+  slot.classList.toggle('selected', selectedPageIds.has(page.id));
+
+  if (previous && previous.renderKey === key && slot.classList.contains('rendered')) {
+    return; // canvas still depicts exactly this page — leave it alone
+  }
+
+  if (slot.classList.contains('rendered')) {
+    // Rotated (or restored to a different rotation): drop the stale canvas
+    // and fall back to a correctly-proportioned empty slot until the new
+    // one lands, rather than showing the old orientation in the meantime.
+    slot.replaceChildren();
+    slot.classList.remove('rendered');
+  }
+  // Sized from this page's own dimensions, so the slot already occupies
+  // exactly the space the rasterized page will need and nothing shifts when
+  // it lands. Computed for the currently baked zoom level, not the unscaled
+  // base size — otherwise a document opened in the middle of an ongoing
+  // zoom gesture would come out the wrong size.
+  const slotSize = slotSizeFor(state, baseScale, page);
+  slot.style.width = `${slotSize.width * state.bakedZoom}px`;
+  slot.style.height = `${slotSize.height * state.bakedZoom}px`;
+  scheduleSlotRender(slot, doc, observer);
+}
+
+// Reconciles one document's page slots against `doc.pages`, in place.
+function reconcileDocumentPages(state, baseScale, doc, container, observer) {
+  const existing = new Map();
+  for (const child of container.children) {
+    if (child.classList.contains('page-slot')) existing.set(child.dataset.pageId, child);
   }
 
   for (const page of doc.pages) {
-    const slot = document.createElement('div');
-    slot.className = 'page-slot';
-    // Sized from this page's own dimensions, so the slot already occupies
-    // exactly the space the rasterized page will need and nothing shifts
-    // when it lands. Computed for the current (just baked, see
-    // resetZoomBaking) zoom level, not the unscaled base size — otherwise a
-    // newly opened document would look the wrong size in the middle of an
-    // ongoing zoom gesture.
-    const slotSize = slotSizeFor(state, baseScale, page);
-    slot.style.width = `${slotSize.width * state.bakedZoom}px`;
-    slot.style.height = `${slotSize.height * state.bakedZoom}px`;
-    slot.dataset.pageId = page.id;
-    slot.classList.toggle('selected', selectedPageIds.has(page.id));
-    slot.draggable = true;
-    slot.addEventListener('click', (event) => handlePageClick(page, event));
-    slot.addEventListener('dblclick', () => toggleFocusMode(slot));
-    slot.addEventListener('dragstart', (event) => startPageDrag(page, event));
-    slot.addEventListener('dragend', cleanupDrag);
-    slot.addEventListener('contextmenu', (event) => handlePageContextMenu(page, event));
+    let slot = existing.get(page.id);
+    if (slot) {
+      existing.delete(page.id);
+      refreshPageSlot(state, baseScale, doc, page, slot, observer);
+    } else {
+      slot = createPageSlot(state, baseScale, doc, page, observer);
+    }
+    // appendChild on a node that is already a child MOVES it — so this one
+    // call both inserts new slots and pulls existing ones into page order.
     container.appendChild(slot);
+  }
 
-    slotRenderInfo.set(slot, { state, baseScale, doc, page });
-    pendingRenders.set(slot, () =>
-      renderPageIntoSlot(slot).catch((error) => {
-        log(`Rendering failed (${doc.displayName}): ${error}`);
-      }),
-    );
-    observer.observe(slot);
+  for (const orphan of existing.values()) {
+    releaseSlot(orphan, observer);
+    orphan.remove();
+  }
+
+  // The empty-document placeholder appears only once the document has no
+  // pages left at all, and has to disappear again the moment it has any.
+  const placeholder = container.querySelector('.placeholder-slot');
+  if (doc.isEmpty && !placeholder) {
+    container.appendChild(createPlaceholderSlot(state));
+  } else if (!doc.isEmpty && placeholder) {
+    placeholder.remove();
   }
 }
 
 // Section header: one component, built identically in both views (filename,
 // unsaved dot, save button, close button) — only the placement (see CSS)
 // differs.
+// Every listener here resolves the document by id at call time instead of
+// closing over the object. The header outlives store changes now, and
+// undo/redo replaces every Document instance (keeping only its id) — a
+// captured reference would quietly act on a document that is no longer in
+// the store, e.g. saving a stale copy.
 function createSectionHeader(doc) {
+  const documentId = doc.id;
+  const withDocument = (fn) => (...args) => {
+    const current = store.getDocument(documentId);
+    if (current) fn(current, ...args);
+  };
+
   const header = document.createElement('div');
   header.className = 'section-header';
+  header.dataset.documentId = documentId;
   // Reorder the whole document by dragging the header — in
   // Canvas left/right between document columns, in Grid up/down between
   // sections. A separate drag mechanism (documentDragPayload) alongside the
   // page drag, see startDocumentDrag().
   header.draggable = true;
-  header.addEventListener('dragstart', (event) => startDocumentDrag(doc.id, event));
+  header.addEventListener('dragstart', (event) => startDocumentDrag(documentId, event));
   header.addEventListener('dragend', cleanupDocumentDrag);
   // Save/close also available via right-click, not only
   // via the icon buttons.
-  header.addEventListener('contextmenu', (event) => handleDocumentContextMenu(doc, event));
+  header.addEventListener('contextmenu', withDocument((d, event) => handleDocumentContextMenu(d, event)));
 
   const name = document.createElement('span');
   name.className = 'section-header-name';
   name.textContent = doc.displayName;
   header.appendChild(name);
-
-  if (doc.dirty) {
-    const dot = document.createElement('span');
-    dot.className = 'dirty-dot';
-    dot.textContent = '●';
-    dot.title = t('sectionHeader.unsavedTitle');
-    header.appendChild(dot);
-  }
 
   // Directly after the filename/dot, not right-aligned — the spacer comes
   // after this and fills the remaining space (if the header is wider than
@@ -2259,9 +2371,7 @@ function createSectionHeader(doc) {
   saveButton.type = 'button';
   saveButton.className = 'icon-button save-button';
   saveButton.appendChild(createIcon('device-floppy', { size: 14 }));
-  saveButton.title = doc.dirty ? t('sectionHeader.saveTitle') : t('sectionHeader.saveDisabledTitle');
-  saveButton.disabled = !doc.dirty;
-  saveButton.addEventListener('click', () => saveDocuments([doc]));
+  saveButton.addEventListener('click', withDocument((d) => saveDocuments([d])));
   header.appendChild(saveButton);
 
   const closeButton = document.createElement('button');
@@ -2269,8 +2379,13 @@ function createSectionHeader(doc) {
   closeButton.className = 'icon-button';
   closeButton.appendChild(createIcon('x', { size: 14 }));
   closeButton.title = t('sectionHeader.closeTitle');
-  closeButton.addEventListener('click', () => closeDocument(doc));
+  closeButton.addEventListener('click', withDocument((d) => closeDocument(d)));
   header.appendChild(closeButton);
+
+  // The dirty dot and the save button's enabled state are the only parts
+  // that change over a header's lifetime — one function owns both, shared
+  // with the silent drag & drop path (see syncDirtyDot).
+  syncHeaderDirtyState(header, doc);
 
   const spacer = document.createElement('span');
   spacer.className = 'section-header-spacer';
@@ -2279,53 +2394,84 @@ function createSectionHeader(doc) {
   return header;
 }
 
-// A full rebuild (every store change rebuilds everything, see
-// renderActiveView) produces all-fresh slots, which get rasterized at the
-// current zoom level on their first render anyway — the still-pending CSS
-// scale-up left over from an ongoing zoom gesture (if one was in progress)
-// therefore needs to be reset, otherwise the new, already correctly
-// resolved pages would get scaled up an extra time.
-function resetZoomBaking(state) {
-  clearTimeout(state.rebakeTimer);
-  state.bakedZoom = state.zoom;
-  state.wrapper.style.zoom = '1';
+// Reconciles one view's DOM against store.documents in place, reusing every
+// document container, header and page slot it can.
+//
+// This deliberately replaced a `wrapper.innerHTML = ''` rebuild. That was
+// cheap only as long as a "rebuild" produced nothing but empty placeholder
+// slots — but it also threw away every ALREADY RASTERIZED page on every
+// store change, so rotating one page, deleting one page or closing one
+// document made the whole view blink and re-render. That blink is why page
+// drag & drop needed its own `{silent: true}` bypass in the first place,
+// and it makes any animation of a layout change pointless: there is nothing
+// left on screen to animate from.
+//
+// `adapt` supplies the per-view differences: which classes the container
+// carries, and anything that has to be refreshed on it per render (the grid
+// needs its alternating tone and its column count, the canvas its width).
+function reconcileView(state, baseScale, pagesClass, adapt) {
+  const { wrapper } = state;
+  const observer = viewObserverFor(state);
+
+  const existing = new Map();
+  for (const container of wrapper.children) {
+    existing.set(container.dataset.documentId, container);
+  }
+
+  store.documents.forEach((doc, index) => {
+    let container = existing.get(doc.id);
+    if (container) {
+      existing.delete(doc.id);
+      syncHeaderDirtyState(container.querySelector('.section-header'), doc);
+    } else {
+      container = document.createElement('div');
+      container.dataset.documentId = doc.id;
+      container.appendChild(createSectionHeader(doc));
+      const pagesWrap = document.createElement('div');
+      pagesWrap.className = pagesClass;
+      container.appendChild(pagesWrap);
+    }
+    adapt(container, doc, index);
+    // appendChild on an existing child MOVES it — one call both inserts new
+    // containers and pulls existing ones into store order.
+    wrapper.appendChild(container);
+    reconcileDocumentPages(state, baseScale, doc, container.querySelector(`.${pagesClass}`), observer);
+  });
+
+  for (const orphan of existing.values()) {
+    for (const slot of orphan.querySelectorAll('.page-slot')) releaseSlot(slot, observer);
+    orphan.remove();
+  }
+
+  // Placeholder slots, the canvas column width and every spacing custom
+  // property (including the derived track width) in one pass, at the
+  // currently baked zoom level.
+  //
+  // Note what is deliberately NOT done here any more: resetting `bakedZoom`
+  // to `zoom` and the wrapper's CSS zoom to 1. That was correct while every
+  // render produced all-new slots that would rasterize at the current zoom
+  // anyway. Surviving slots were rasterized at the OLD `bakedZoom`, so
+  // resetting it would show them at the wrong size; and a pending rebake
+  // must be left running rather than cancelled, since it is what sharpens
+  // old and new slots together.
   applyBakedSizes(state);
 }
 
 function renderCanvasView() {
-  resetZoomBaking(canvasZoomState);
-  canvasZoomWrapper.innerHTML = '';
-  const observer = createViewObserver(canvasView);
-  for (const doc of store.documents) {
-    const column = document.createElement('div');
+  reconcileView(canvasZoomState, BASE_CANVAS_SCALE, 'canvas-pages', (column) => {
     column.className = 'canvas-column document-container';
-    column.dataset.documentId = doc.id;
     column.style.width = `${canvasZoomState.columnWidth * canvasZoomState.bakedZoom}px`;
-
-    column.appendChild(createSectionHeader(doc));
-
-    const pagesWrap = document.createElement('div');
-    pagesWrap.className = 'canvas-pages';
-    column.appendChild(pagesWrap);
-
-    canvasZoomWrapper.appendChild(column);
-    renderDocumentPages(canvasZoomState, BASE_CANVAS_SCALE, doc, pagesWrap, observer);
-  }
+  });
 }
 
 function renderGridView() {
-  resetZoomBaking(gridZoomState);
-  gridZoomWrapper.innerHTML = '';
-  const observer = createViewObserver(gridView);
-  store.documents.forEach((doc, index) => {
-    const section = document.createElement('div');
+  reconcileView(gridZoomState, BASE_GRID_SCALE, 'grid-pages', (section, doc, index) => {
+    // The alternating background follows the document's position, so it has
+    // to be reassigned on every render — reordering documents changes it
+    // even though nothing about the document itself did.
     section.className = `grid-section document-container ${index % 2 === 0 ? 'tone-a' : 'tone-b'}`;
-    section.dataset.documentId = doc.id;
 
-    section.appendChild(createSectionHeader(doc));
-
-    const grid = document.createElement('div');
-    grid.className = 'grid-pages';
+    const grid = section.querySelector('.grid-pages');
     // Fixed column count instead of automatic wrapping: "--"
     // (gridColumnsPerRow === 'all') means "whole document in one row" — set
     // the column count individually to this document's actual page count
@@ -2337,10 +2483,6 @@ function renderGridView() {
     // have exactly the same total width (and therefore centering),
     // regardless of their respective actual page count.
     grid.style.gridTemplateColumns = `repeat(${columns}, var(--grid-col-width))`;
-    section.appendChild(grid);
-
-    gridZoomWrapper.appendChild(section);
-    renderDocumentPages(gridZoomState, BASE_GRID_SCALE, doc, grid, observer);
   });
 }
 
@@ -2592,8 +2734,16 @@ function resetViewStateForTests() {
   // held. Harmless for the app, since both are hidden by then — but a test
   // querying `.page-slot` afterwards would still find the previous test's
   // pages. Clear them explicitly.
-  canvasZoomWrapper.innerHTML = '';
-  gridZoomWrapper.innerHTML = '';
+  //
+  // Unobserve before detaching: the per-view IntersectionObserver now
+  // outlives a render (see viewObserverFor) and holds a strong reference to
+  // everything it watches, so dropping the elements alone would keep every
+  // test's slots — and their rasterized canvases — alive for the whole run.
+  for (const state of [canvasZoomState, gridZoomState]) {
+    const observer = viewObserverFor(state);
+    for (const slot of state.wrapper.querySelectorAll('.page-slot')) releaseSlot(slot, observer);
+    state.wrapper.innerHTML = '';
+  }
 }
 
 // Re-exported for targeted verification (e.g. via the Chrome DevTools

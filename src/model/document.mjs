@@ -13,8 +13,10 @@ let nextDocumentId = 1;
  * individual page removal.
  */
 export class Document {
-  constructor({ filePath, displayName, pages, originalSource = null }) {
-    this.id = `document-${nextDocumentId++}`;
+  // `id` is only ever passed by DocumentStore._restore() — see the same
+  // note on Page's constructor for why identity has to survive undo/redo.
+  constructor({ filePath, displayName, pages, originalSource = null, id = null }) {
+    this.id = id ?? `document-${nextDocumentId++}`;
     this.filePath = filePath;
     this.displayName = displayName;
     this.pages = pages;
