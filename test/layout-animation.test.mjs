@@ -27,11 +27,24 @@ const SMALL_FILE = fixture('019-grayscale-image', 'grayscale-image.pdf');
 
 let session;
 
+// The animation is deliberately skipped when the OS asks for reduced motion,
+// so every test here has to state which of the two worlds it is testing
+// rather than inheriting the host's setting. Both CI runners report `reduce`
+// (Windows Server disables animations by default; the macOS images likewise),
+// so without pinning this the three positive tests below passed locally and
+// failed identically on both runners — reading as a code bug when nothing was
+// actually wrong.
+const setReducedMotion = (value) =>
+  session.send('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value }],
+  });
+
 before(async () => {
   session = await startSession({ name: 'layout-animation', port: CDP_PORTS.layoutAnimation });
 });
 
 beforeEach(async () => {
+  await setReducedMotion('no-preference');
   await session.reset();
   await session.openFiles([A4_FILE, SMALL_FILE]);
   await session.evaluate(`__mod.setView('grid'); true`);
@@ -144,6 +157,28 @@ test('rotating a page into landscape animates the pages that have to make room',
 
   await session.waitForIdle();
   assert.equal(await animating(), false);
+});
+
+test('nothing animates when the OS asks for reduced motion', async () => {
+  await setReducedMotion('reduce');
+
+  const started = await session.evaluate(`
+    (() => {
+      const doc = __mod.store.documents.find((d) => d.displayName === 'pdflatex-4-pages.pdf');
+      __mod.closeDocument(doc);
+      return __mod.isLayoutAnimatingForTests();
+    })()
+  `);
+  assert.equal(started, false, 'reduced motion should suppress the animation entirely');
+
+  // Suppressed, not broken: the layout still ends up correct, the pages just
+  // arrive there instead of travelling.
+  assert.equal(await session.evaluate(`document.querySelectorAll('#grid-view .page-slot').length`), 1);
+  const leftovers = await session.evaluate(`
+    [...document.querySelectorAll('#grid-view .page-slot')]
+      .filter((el) => el.style.transform || el.style.transition).length
+  `);
+  assert.equal(leftovers, 0);
 });
 
 test('nothing animates when a change leaves the cell size alone', async () => {

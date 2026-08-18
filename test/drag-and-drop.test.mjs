@@ -195,9 +195,21 @@ test('dragging a document\'s section header reorders it among its siblings', asy
 
   // Drag doc B's header to before doc A's header — expected final order:
   // [docB, docA].
+  //
+  // Deliberately offset into doc A's LEFT half rather than dropped on its
+  // centre. computeDocumentDropTarget() compares against each container's
+  // midpoint with `<`, so a drop exactly on that midpoint falls through to
+  // "at the end" — and the section header's centre now coincides with its
+  // column's centre exactly (it is width-matched to the page and centred
+  // with `margin-inline: auto`), which used to be ~11px to the left of it
+  // back when the header was left-aligned in a wider fixed column. Without
+  // the offset the outcome is decided by sub-pixel rounding: it passed
+  // locally and failed identically on both CI runners.
   await dragAndDrop(
     `.document-container[data-document-id="${docBId}"] .section-header`,
-    dropPointAt(`.document-container[data-document-id="${docAId}"] .section-header`),
+    dropPointAt(`.document-container[data-document-id="${docAId}"] .section-header`, {
+      offsetX: -40,
+    }),
   );
 
   const docIdsAfter = await session.evaluate(`__mod.store.documents.map((d) => d.id)`);
