@@ -262,7 +262,10 @@
 
       .canvas-column {
         flex: 0 0 auto;
-        width: 380px;
+        /* Always overridden inline by renderer.js (derived from the largest
+           open page, see syncDerivedCellSizes) — this only covers the moment
+           before the first render. */
+        width: 358px;
         display: flex;
         flex-direction: column;
         gap: 8px;
@@ -273,11 +276,22 @@
         top: 0;
         background: #2c2e30;
         border-radius: 4px;
+        /* The header is set to the exact width of the page below it
+           (syncCanvasColumnHeaderWidth), and pages are centered in their
+           column — without this the header would stay left-aligned and
+           visibly not line up with a page narrower than the column. */
+        margin-inline: auto;
       }
 
       .canvas-pages {
         display: flex;
         flex-direction: column;
+        /* Pages narrower than the column (the column is sized for the
+           largest page across ALL open documents) sit centered rather than
+           left-aligned. Also makes a slot shrink-wrap its page instead of
+           being stretched to the full column width by the default
+           `align-items: stretch`. */
+        align-items: center;
         gap: var(--page-gap, 8px);
       }
 
@@ -321,6 +335,14 @@
         gap: var(--thumb-gap, 10px);
         width: max-content;
         margin: 0 auto;
+        /* Track width is derived from the largest page across ALL open
+           documents (syncDerivedCellSizes), so a page smaller than that
+           leaves room in its cell — center it there instead of letting the
+           default `stretch` blow the slot up to the full track with the page
+           stuck on the left. Rows stay auto-sized on purpose: a fixed row
+           height would reintroduce vertical dead space, and nothing needs
+           rows to line up across documents (sections are stacked). */
+        place-items: center;
       }
 
       /* --- Shared section-header component (filename, dirty dot, save, close) --- */

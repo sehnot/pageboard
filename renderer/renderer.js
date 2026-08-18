@@ -39,6 +39,54 @@ const store = new DocumentStore();
 // noticed.
 const pdfProxies = new Map();
 
+// Intrinsic size of every page of an opened file, in PDF points, at scale 1
+// and rotation 0 — keyed by PdfSource id, same as `pdfProxies` above, and
+// likewise never pruned (undo can resurrect a closed document's pages).
+//
+// Deliberately a renderer-side side table rather than a field on PdfSource:
+// the model is kept free of any PDF-library-specific data on purpose (see
+// the comment in src/model/pdf-source.mjs explaining why even `pageCount`
+// is passed in from outside), and nothing in src/model/ ever reads these.
+// Keying on the source id also means the sizes survive undo/redo for free —
+// snapshots only store `sourceId`/`sourcePageIndex` (see store.mjs).
+const pdfPageSizes = new Map(); // source.id -> [{ width, height }, ...]
+
+// How many pages to measure per await. `getPage()` is cheap in time
+// (~0.13ms/page measured), but each call permanently materializes a
+// PDFPageProxy plus its parsed page dictionary in pdf.js's worker cache —
+// which is exactly what the virtualization below tries to avoid doing for
+// every page up front. Chunking keeps a pathological file (tens of
+// thousands of pages) from queueing every worker message in one tick.
+const PAGE_SIZE_MEASURE_CHUNK = 200;
+
+// Measures every page of a freshly opened document.
+//
+// `rotation: 0` is passed explicitly and is load-bearing, not decoration:
+// pdf.js defaults this argument to the page's own intrinsic /Rotate, but
+// this app ignores intrinsic rotation entirely — computeCanvas() renders
+// with `rotation: page.rotation`, i.e. the editor's rotation as an ABSOLUTE
+// value (see the matching note in main/pdf-writer.mjs). Measuring without
+// this argument would report swapped dimensions for any page whose file
+// declares a /Rotate, and the derived cell size would be wrong for exactly
+// those pages.
+async function readPageSizes(pdf) {
+  const sizes = [];
+  for (let first = 1; first <= pdf.numPages; first += PAGE_SIZE_MEASURE_CHUNK) {
+    const last = Math.min(first + PAGE_SIZE_MEASURE_CHUNK - 1, pdf.numPages);
+    const chunk = [];
+    for (let pageNumber = first; pageNumber <= last; pageNumber += 1) {
+      chunk.push(
+        pdf.getPage(pageNumber).then((page) => {
+          const { width, height } = page.getViewport({ scale: 1, rotation: 0 });
+          return { width, height };
+        }),
+      );
+    }
+    sizes.push(...(await Promise.all(chunk)));
+  }
+  return sizes;
+}
+
 let currentView = 'canvas'; // 'canvas' | 'grid'
 
 // --- Canvas virtualization ---------------------------------------------
@@ -256,26 +304,12 @@ let preFocusViewState = null;
 // zoomAtPoint()/scheduleRebake().
 const BASE_CANVAS_SCALE = 0.6;
 const BASE_GRID_SCALE = 0.25;
-const CANVAS_PLACEHOLDER_SIZE = { width: 340, height: 440 };
-const GRID_PLACEHOLDER_SIZE = { width: 180, height: 234 };
-// Base width of a document column at zoom 1 (see .canvas-column CSS — must
-// match the base render scale, otherwise pages overlap).
-// Grows along with `bakedZoom` (applyBakedSizes()), otherwise `max-width:
-// 100%` on the pages would clip the sharply re-rendered image back down to
-// the old, unscaled column width after a rebake.
-const CANVAS_COLUMN_WIDTH = 380;
-// Fixed column width for the grid (at zoom 1) — deliberately not
-// `max-content`: that would give every document its own width depending on
-// its actual page count, so a document with e.g. 5 pages (at 8 columns)
-// would be centered at a different horizontal position than one with 20
-// pages — page 1 of the two documents would then no longer line up
-// vertically. With a column width identical across all documents, every
-// `.grid-pages` has the same total width (column count × this width) and
-// they all center at the same spot; documents with fewer pages simply fill
-// only the first columns from the left. Some buffer above
-// the real render size at BASE_GRID_SCALE (0.25) — real pages usually come
-// out around ~125–155px.
-const GRID_COLUMN_WIDTH = 180;
+// The cell every page sits in (grid track / canvas column) is derived from
+// the real page sizes — see syncDerivedCellSizes(). This is only the
+// fallback for the window before any size is known, which in practice means
+// the empty canvas: sizes are measured before addDocument() fires the
+// rebuild. A4 in PDF points, i.e. the same unit the measured sizes use.
+const FALLBACK_CELL_SIZE = { width: 595.28, height: 841.89 };
 
 const canvasZoomState = {
   zoom: 1,
@@ -284,8 +318,12 @@ const canvasZoomState = {
   activeAnchor: null, // { el, fractionX, fractionY } — fixed for the duration of a zoom gesture
   container: canvasView,
   wrapper: canvasZoomWrapper,
-  placeholderSize: CANVAS_PLACEHOLDER_SIZE,
-  columnWidth: CANVAS_COLUMN_WIDTH,
+  baseScale: BASE_CANVAS_SCALE,
+  // Both derived from the real page sizes on every render — see
+  // syncDerivedCellSizes(). `cellSize` is in PDF points (like the measured
+  // sizes), `columnWidth` in CSS px at zoom 1.
+  cellSize: FALLBACK_CELL_SIZE,
+  columnWidth: Math.ceil(FALLBACK_CELL_SIZE.width * BASE_CANVAS_SCALE) + 1,
   // Base values (at zoom 1) of the CSS custom properties that `gap`/
   // `padding` are defined through in the stylesheet (see index.html).
   // Without this coupling, spacing would stay stuck at its unscaled base
@@ -301,15 +339,84 @@ const gridZoomState = {
   activeAnchor: null,
   container: gridView,
   wrapper: gridZoomWrapper,
-  placeholderSize: GRID_PLACEHOLDER_SIZE,
+  baseScale: BASE_GRID_SCALE,
+  cellSize: FALLBACK_CELL_SIZE,
   columnWidth: null, // grid sections have no fixed width, no fix needed
   spacing: {
     '--thumb-gap': 10,
     '--section-padding-v': 12,
     '--section-padding-h': 16,
-    '--grid-col-width': GRID_COLUMN_WIDTH,
+    // Unlike its siblings this is not a constant base value but is rewritten
+    // on every render by syncDerivedCellSizes(); applyBakedSizes() then
+    // scales it by `bakedZoom` like all the others.
+    '--grid-col-width': Math.ceil(FALLBACK_CELL_SIZE.width * BASE_GRID_SCALE) + 1,
   },
 };
+
+// --- Cell size derived from the real page dimensions -------------------
+// A page's cell (the grid track / canvas column it sits in) used to be a
+// fixed constant well above any realistic page size, which left dead space
+// around every page — for a corpus of small pages, far more dead space than
+// page. Instead, the cell is sized to the LARGEST page across all open
+// documents, so a corpus of uniformly small pages packs tightly while a
+// mixed corpus still shows the smaller pages proportionally smaller.
+//
+// The maximum is deliberately global rather than per-document: it is what
+// keeps every `.grid-pages` the same total width at the same column count,
+// and therefore keeps all documents centered identically (see the
+// FALLBACK_CELL_SIZE comment above). Note the consequence — rotating a
+// single page to landscape in an otherwise portrait corpus raises the
+// global maximum width for everyone.
+//
+// The render scale itself (BASE_*_SCALE) is untouched: pages keep exactly
+// the size they always had, only the box around them shrinks.
+
+// Size a page actually occupies on screen, before scaling — i.e. its
+// intrinsic size with width/height swapped when the editor rotation turns
+// it sideways. `null` when the source's sizes aren't known.
+function effectivePageSize(page) {
+  const size = pdfPageSizes.get(page.source.id)?.[page.sourcePageIndex];
+  if (!size) return null;
+  const sideways = page.rotation === 90 || page.rotation === 270;
+  return sideways ? { width: size.height, height: size.width } : size;
+}
+
+function globalMaxPageSize() {
+  let width = 0;
+  let height = 0;
+  for (const doc of store.documents) {
+    for (const page of doc.pages) {
+      const size = effectivePageSize(page);
+      if (!size) continue;
+      if (size.width > width) width = size.width;
+      if (size.height > height) height = size.height;
+    }
+  }
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+// Per-page slot size at the given view's base scale, falling back to the
+// shared cell when the page's own size is unknown.
+function slotSizeFor(state, baseScale, page) {
+  const size = (page && effectivePageSize(page)) ?? state.cellSize;
+  return { width: size.width * baseScale, height: size.height * baseScale };
+}
+
+// Pushes the current global maximum into both zoom states. Called from
+// renderActiveView (i.e. after every store change), which is enough on its
+// own: every mutation that can change the maximum — open, close, rotate,
+// delete, duplicate, restore-original, undo/redo — notifies. The two
+// `{silent: true}` paths (page drag & drop, document reorder) only relocate
+// existing pages and therefore cannot change it.
+function syncDerivedCellSizes() {
+  const max = globalMaxPageSize() ?? FALLBACK_CELL_SIZE;
+  canvasZoomState.cellSize = max;
+  gridZoomState.cellSize = max;
+  // Rounded up by a pixel: the cell must never come out narrower than the
+  // page it holds, or `max-width: 100%` would scale that page down.
+  canvasZoomState.columnWidth = Math.ceil(max.width * BASE_CANVAS_SCALE) + 1;
+  gridZoomState.spacing['--grid-col-width'] = Math.ceil(max.width * BASE_GRID_SCALE) + 1;
+}
 
 // Brings everything that isn't part of the actual page rendering but still
 // has a fixed pixel size to the currently baked zoom level: still-invisible
@@ -317,9 +424,21 @@ const gridZoomState = {
 // padding referenced in the stylesheet via CSS custom properties
 // (`--page-gap` etc.) instead of fixed px values.
 function applyBakedSizes(state) {
-  for (const slot of state.container.querySelectorAll('.page-slot:not(.rendered), .placeholder-slot')) {
-    slot.style.width = `${state.placeholderSize.width * state.bakedZoom}px`;
-    slot.style.height = `${state.placeholderSize.height * state.bakedZoom}px`;
+  // Sized per page rather than from one shared constant, so a slot occupies
+  // exactly the space its page will need — no layout jump when it finally
+  // rasterizes. `slotRenderInfo` may miss: this also runs (via
+  // resetZoomBaking) against the previous build's slots.
+  for (const slot of state.container.querySelectorAll('.page-slot:not(.rendered)')) {
+    const size = slotSizeFor(state, state.baseScale, slotRenderInfo.get(slot)?.page);
+    slot.style.width = `${size.width * state.bakedZoom}px`;
+    slot.style.height = `${size.height * state.bakedZoom}px`;
+  }
+  // The empty-document placeholder has no page behind it — it gets the
+  // shared cell, i.e. exactly one max-sized page.
+  for (const placeholder of state.container.querySelectorAll('.placeholder-slot')) {
+    const size = slotSizeFor(state, state.baseScale, null);
+    placeholder.style.width = `${size.width * state.bakedZoom}px`;
+    placeholder.style.height = `${size.height * state.bakedZoom}px`;
   }
   if (state.columnWidth) {
     for (const column of state.container.querySelectorAll('.canvas-column')) {
@@ -2031,10 +2150,12 @@ async function renderPageIntoSlot(slot) {
 }
 
 // The sticky label (section header) of a Canvas column should be exactly as
-// wide as the actually rendered page below it, not the (deliberately
-// somewhat more generous, see CANVAS_COLUMN_WIDTH) column itself —
-// otherwise the label appears wider than the page. A no-op in Grid view
-// (there's no `.canvas-column` ancestor element there).
+// wide as the actually rendered page below it, not the column itself — the
+// column is sized for the largest page across ALL open documents
+// (syncDerivedCellSizes), so for any smaller page the label would otherwise
+// come out wider than it. Paired with `margin-inline: auto` in the
+// stylesheet, which keeps the narrowed label centered over its equally
+// centered page. A no-op in Grid view (no `.canvas-column` ancestor there).
 function syncCanvasColumnHeaderWidth(slot, canvas) {
   const header = slot.closest('.canvas-column')?.querySelector('.section-header');
   if (header) header.style.width = `${canvas.width}px`;
@@ -2055,8 +2176,11 @@ function syncCanvasColumnHeaderWidth(slot, canvas) {
 function createPlaceholderSlot(state) {
   const placeholder = document.createElement('div');
   placeholder.className = 'placeholder-slot';
-  placeholder.style.width = `${state.placeholderSize.width * state.bakedZoom}px`;
-  placeholder.style.height = `${state.placeholderSize.height * state.bakedZoom}px`;
+  // No page behind it, so it gets the shared cell — exactly one max-sized
+  // page, which is also what makes it a sensible drop target.
+  const size = slotSizeFor(state, state.baseScale, null);
+  placeholder.style.width = `${size.width * state.bakedZoom}px`;
+  placeholder.style.height = `${size.height * state.bakedZoom}px`;
   return placeholder;
 }
 
@@ -2069,12 +2193,15 @@ function renderDocumentPages(state, baseScale, doc, container, observer) {
   for (const page of doc.pages) {
     const slot = document.createElement('div');
     slot.className = 'page-slot';
-    // Size is computed directly for the current (just baked, see
+    // Sized from this page's own dimensions, so the slot already occupies
+    // exactly the space the rasterized page will need and nothing shifts
+    // when it lands. Computed for the current (just baked, see
     // resetZoomBaking) zoom level, not the unscaled base size — otherwise a
     // newly opened document would look the wrong size in the middle of an
     // ongoing zoom gesture.
-    slot.style.width = `${state.placeholderSize.width * state.bakedZoom}px`;
-    slot.style.height = `${state.placeholderSize.height * state.bakedZoom}px`;
+    const slotSize = slotSizeFor(state, baseScale, page);
+    slot.style.width = `${slotSize.width * state.bakedZoom}px`;
+    slot.style.height = `${slotSize.height * state.bakedZoom}px`;
     slot.dataset.pageId = page.id;
     slot.classList.toggle('selected', selectedPageIds.has(page.id));
     slot.draggable = true;
@@ -2173,7 +2300,7 @@ function renderCanvasView() {
     const column = document.createElement('div');
     column.className = 'canvas-column document-container';
     column.dataset.documentId = doc.id;
-    column.style.width = `${CANVAS_COLUMN_WIDTH * canvasZoomState.bakedZoom}px`;
+    column.style.width = `${canvasZoomState.columnWidth * canvasZoomState.bakedZoom}px`;
 
     column.appendChild(createSectionHeader(doc));
 
@@ -2205,8 +2332,8 @@ function renderGridView() {
     // for that (not e.g. some very large flat number, which would just
     // define unnecessarily many empty grid columns).
     const columns = gridColumnsPerRow === 'all' ? Math.max(1, doc.pages.length) : gridColumnsPerRow;
-    // Fixed width (CSS var instead of `max-content`) — see
-    // GRID_COLUMN_WIDTH: ensures all documents with the same column count
+    // One shared track width (CSS var instead of `max-content`) — see
+    // syncDerivedCellSizes: ensures all documents with the same column count
     // have exactly the same total width (and therefore centering),
     // regardless of their respective actual page count.
     grid.style.gridTemplateColumns = `repeat(${columns}, var(--grid-col-width))`;
@@ -2218,6 +2345,9 @@ function renderGridView() {
 }
 
 function renderActiveView() {
+  // Before either view is built: both of them read the derived cell size
+  // while laying out (column width, grid track width, slot sizes).
+  syncDerivedCellSizes();
   const hasDocuments = store.documents.length > 0;
   emptyState.classList.toggle('hidden', hasDocuments);
   canvasView.classList.toggle('hidden', !hasDocuments || currentView !== 'canvas');
@@ -2306,8 +2436,17 @@ async function handleOpenedFiles(fileInfos) {
       // array and get reported via the same catch/reasonCorrupted path
       // anyway, just by accident rather than intent.
       if (pdf.numPages === 0) throw new Error('PDF has no pages');
+      // Measured BEFORE addDocument() on purpose, and this ordering has to
+      // stay: addDocument() notifies, which rebuilds the view, which derives
+      // the shared cell size from these sizes (see syncDerivedCellSizes).
+      // Moving the measurement into the background to speed up opening a
+      // huge file would mean the first build lays out against an incomplete
+      // maximum — that variant needs an explicit re-render once the
+      // measurement lands, which is exactly the hook this ordering avoids.
+      const pageSizes = await readPageSizes(pdf);
       const doc = createDocumentFromFile(filePath, info.bytes, pdf.numPages);
       pdfProxies.set(doc.pages[0].source.id, pdf);
+      pdfPageSizes.set(doc.pages[0].source.id, pageSizes);
       store.addDocument(doc);
       log(`Opened: ${filePath} (${pdf.numPages} pages)`);
     } catch (error) {
