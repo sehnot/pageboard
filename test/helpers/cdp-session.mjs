@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
+import net from 'node:net';
 // The `electron` package's main entry, when required/imported from a plain
 // Node context (not Electron's own runtime), resolves to the absolute path of
 // the platform binary itself — Electron.app/.../Electron on macOS,
@@ -82,6 +83,11 @@ const CDP_CALL_TIMEOUT_MS = 60000;
 const DEBUGGER_URL_TIMEOUT_MS = 30000;
 const RENDERER_IMPORT_TIMEOUT_MS = 30000;
 const POLL_INTERVAL_MS = 100;
+// Upper bound for a single "is anything still listening on this port?" probe
+// against localhost. A live listener answers in well under a millisecond, so
+// this only ever fires when a connection neither completes nor is refused —
+// it exists so one wedged socket cannot hang the whole teardown.
+const PORT_PROBE_TIMEOUT_MS = 1000;
 export const DEFAULT_WAIT_TIMEOUT_MS = 30000;
 
 function sleep(ms) {
@@ -109,14 +115,40 @@ function killElectron(child) {
   }
 }
 
+// Deliberately a raw TCP connect rather than `fetch`, even though the same
+// question could be asked over HTTP.
+//
+// This runs immediately after SIGKILLing Electron, so every attempt races a
+// dying listener — exactly the window in which a connection can fail deep
+// inside libuv rather than cleanly. `fetch` raises such a failure (observed
+// on macOS CI: "setTypeOfService EINVAL") outside its own promise chain, as
+// an uncaughtException that no `try`/`catch` around the `await` can see. It
+// arrives after the hook has already resolved, so node:test attributes it to
+// the whole test FILE and fails it even though every test in it passed.
+//
+// A socket we own has an explicit 'error' handler, so the same failure is
+// just an event, and `destroy()` guarantees nothing is left half-open for
+// the process exit to trip over. There is no connection pool involved either
+// — `fetch` keeps sockets alive for reuse, which is precisely what outlives
+// the hook here.
+function isPortListening(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ port, host: '127.0.0.1' });
+    const settle = (listening) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(listening);
+    };
+    socket.once('connect', () => settle(true));
+    socket.once('error', () => settle(false));
+    socket.setTimeout(PORT_PROBE_TIMEOUT_MS, () => settle(false));
+  });
+}
+
 async function waitForPortFree(port, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      await fetch(`http://127.0.0.1:${port}/json`);
-    } catch {
-      return; // nothing listening any more — the instance is really gone
-    }
+    if (!(await isPortListening(port))) return; // the instance is really gone
     await sleep(POLL_INTERVAL_MS);
   }
   throw new Error(`CDP port ${port} was still in use ${timeoutMs}ms after killing Electron`);
