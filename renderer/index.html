@@ -417,34 +417,23 @@
         background: transparent;
       }
 
-      /* Highlighted as the current drop target while dragging a page
-         (dropping pages onto the placeholder reactivates the document) —
-         replaces the usual thin bar here, since without a neighboring page
-         there's nothing for it to dock against. */
-      .placeholder-slot.drop-target {
-        border-color: #6cb2ff;
-        background: rgba(108, 178, 255, 0.08);
-      }
-
       /* --- Drag & drop of pages (Concept 3.2) --- */
       .page-slot.drag-source {
         opacity: 0.35;
       }
 
-      /* Thin bar between two target pages (drop indicator). Deliberately a
-         `position: fixed` overlay rather than a real element inserted into
-         the layout: in Grid view, an inserted element would occupy its own
-         CSS Grid cell and shift the wrapping — as an overlay, its position
-         can simply be computed from the target page instead, without
-         disturbing the layout. */
-      .drop-indicator {
-        position: fixed;
-        display: none;
-        background: #6cb2ff;
-        box-shadow: 0 0 4px rgba(108, 178, 255, 0.8);
-        border-radius: 2px;
-        z-index: 1002;
-        pointer-events: none;
+      /* Stand-in for the document that dropping at the outer edge would
+         create. It exists only during a drag and never reaches the store —
+         dashed like the empty-document placeholder, which is the existing
+         visual language here for "not a real document (yet)". */
+      .drag-phantom {
+        border: 2px dashed #6b6e70;
+        border-radius: 4px;
+      }
+
+      .drag-phantom .section-header {
+        color: #9aa0a3;
+        font-style: italic;
       }
 
       /* Custom drag image for multi-selection (see startPageDrag in

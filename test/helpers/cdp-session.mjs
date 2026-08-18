@@ -50,6 +50,7 @@ export const CDP_PORTS = {
   cellSize: 9431,
   reconciliation: 9432,
   layoutAnimation: 9433,
+  dragPreview: 9434,
 };
 
 // Every CDP-driven test runs against this exact viewport, on every OS.

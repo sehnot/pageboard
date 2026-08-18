@@ -41,6 +41,7 @@ const en = {
   },
   drag: {
     pagesBadge: '{count} pages',
+    newDocument: 'New document',
   },
   sectionHeader: {
     unsavedTitle: 'Unsaved changes',
@@ -194,6 +195,7 @@ const de = {
   },
   drag: {
     pagesBadge: '{count} Seiten',
+    newDocument: 'Neues Dokument',
   },
   sectionHeader: {
     unsavedTitle: 'Ungespeicherte Änderungen',

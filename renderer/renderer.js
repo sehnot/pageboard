@@ -718,12 +718,22 @@ function updateSelectionVisuals() {
 // target are always in the same window.
 let dragPayload = null; // { pageIds: string[] } | null
 let lastDropTarget = null;
+let pageDropCompleted = false;
+// Where the pointer stood when the preview was last rearranged — see
+// DRAG_PREVIEW_HYSTERESIS_PX.
+let lastPreviewPoint = null;
 
-const dropIndicatorEl = document.createElement('div');
-dropIndicatorEl.className = 'drop-indicator';
-document.body.appendChild(dropIndicatorEl);
-
-const DROP_INDICATOR_THICKNESS = 3;
+// Moving the dragged pages into the hovered position shifts every page after
+// them by one cell, which can move the page under the cursor out from under
+// it — and the next dragover then computes the previous position again.
+// Right on a cell boundary the two positions alternate on every pointer
+// event, and the preview flickers between them.
+//
+// So a new target is only adopted once the pointer has actually travelled a
+// bit since the last rearrangement. Same shape of problem, and same shape of
+// fix, as the zoom anchor being pinned for the duration of a gesture rather
+// than re-picked per wheel event (see LESSONS.md).
+const DRAG_PREVIEW_HYSTERESIS_PX = 14;
 
 // Shared by drag-start and the context menu: if the affected page is part
 // of a (possibly cross-document) multi-selection, the action applies to the
@@ -775,22 +785,18 @@ function cleanupDrag() {
   for (const slot of document.querySelectorAll('.page-slot.drag-source')) {
     slot.classList.remove('drag-source');
   }
-  dropIndicatorEl.style.display = 'none';
-  setPlaceholderDropHighlight(null);
+  removePhantomDocument();
+  // The preview rearranged the DOM without ever touching the model, so if no
+  // drop landed (Esc, or released over something that isn't a target) the
+  // model is still authoritative and simply reconciling against it undoes
+  // the preview. Safe precisely because nothing was mutated — same reasoning
+  // as the document-reorder preview's own cancel path.
+  if (dragPayload && !pageDropCompleted) renderActiveView();
+
   dragPayload = null;
   lastDropTarget = null;
-}
-
-// Dragging a page onto a completely empty document (dropping pages onto
-// the placeholder reactivates the document) has no
-// neighboring page for the usual thin bar to dock against — instead, the
-// dashed placeholder itself is highlighted as the target.
-let highlightedPlaceholder = null;
-function setPlaceholderDropHighlight(el) {
-  if (highlightedPlaceholder === el) return;
-  highlightedPlaceholder?.classList.remove('drop-target');
-  highlightedPlaceholder = el;
-  highlightedPlaceholder?.classList.add('drop-target');
+  lastPreviewPoint = null;
+  pageDropCompleted = false;
 }
 
 // Finds the insertion position within a document and references it via the
@@ -854,7 +860,11 @@ function findDropEdgeZone(clientX, clientY, containers) {
 }
 
 function computeDropTarget(clientX, clientY) {
-  const containers = [...getActiveContainer().querySelectorAll('.document-container')];
+  // The phantom is excluded: it only exists because the pointer is already
+  // past the outermost real document, and letting it count as a container
+  // would make it swallow the pointer as an 'insert' target the moment it
+  // appeared — so the "new document" target could never stay stable.
+  const containers = [...getActiveContainer().querySelectorAll('.document-container:not(.drag-phantom)')];
   const hovered = containers.find((el) => {
     const r = el.getBoundingClientRect();
     return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
@@ -871,79 +881,101 @@ function computeDropTarget(clientX, clientY) {
   return { type: 'invalid' };
 }
 
-function positionIndicator(rectLike, orientation) {
-  dropIndicatorEl.style.display = 'block';
-  if (orientation === 'horizontal') {
-    dropIndicatorEl.style.left = `${rectLike.left}px`;
-    dropIndicatorEl.style.width = `${rectLike.width}px`;
-    dropIndicatorEl.style.top = `${rectLike.top - DROP_INDICATOR_THICKNESS / 2}px`;
-    dropIndicatorEl.style.height = `${DROP_INDICATOR_THICKNESS}px`;
-  } else {
-    dropIndicatorEl.style.top = `${rectLike.top}px`;
-    dropIndicatorEl.style.height = `${rectLike.height}px`;
-    dropIndicatorEl.style.left = `${rectLike.left - DROP_INDICATOR_THICKNESS / 2}px`;
-    dropIndicatorEl.style.width = `${DROP_INDICATOR_THICKNESS}px`;
+function samePageDropTarget(a, b) {
+  if (!a || !b || a.type !== b.type) return false;
+  if (a.type === 'insert') {
+    return (
+      a.documentId === b.documentId &&
+      (a.beforePageId ?? null) === (b.beforePageId ?? null) &&
+      !!a.atEnd === !!b.atEnd
+    );
   }
+  if (a.type === 'new-document') return a.position === b.position;
+  return true; // 'invalid'
 }
 
-function updateDropIndicator(target) {
-  if (!target || target.type === 'invalid') {
-    dropIndicatorEl.style.display = 'none';
-    setPlaceholderDropHighlight(null);
+// --- The drag preview ---------------------------------------------------
+// There used to be a thin bar marking where the pages would land. Dragging a
+// whole document already worked differently — the document itself moves to
+// the hovered spot while the drag is still in progress — and pages now do
+// the same: the other pages get out of the way, so what you see during the
+// drag is the result you will get, with nothing to mentally translate from a
+// marker into an outcome.
+//
+// The model is untouched until the actual drop. Everything here is DOM-only,
+// which is what makes cancelling free: reconciling against the (unchanged)
+// store restores the original order exactly.
+
+// A stand-in for a document that does not exist yet, shown while pages are
+// held past the first/last document. Never enters the store; it is either
+// replaced by the real thing on drop or removed on cancel.
+let phantomDocumentEl = null;
+
+function removePhantomDocument() {
+  phantomDocumentEl?.remove();
+  phantomDocumentEl = null;
+}
+
+function ensurePhantomDocument(position) {
+  const wrapper = currentView === 'canvas' ? canvasZoomWrapper : gridZoomWrapper;
+  if (!phantomDocumentEl) {
+    phantomDocumentEl = document.createElement('div');
+    const header = document.createElement('div');
+    header.className = 'section-header';
+    const name = document.createElement('span');
+    name.className = 'section-header-name';
+    name.textContent = t('drag.newDocument');
+    header.appendChild(name);
+    phantomDocumentEl.appendChild(header);
+    const pagesWrap = document.createElement('div');
+    pagesWrap.className = currentView === 'canvas' ? 'canvas-pages' : 'grid-pages';
+    phantomDocumentEl.appendChild(pagesWrap);
+  }
+
+  // Rebuilt per call rather than once: the classes carry the view-specific
+  // layout, and a drag can cross from Canvas to Grid via the view switcher.
+  phantomDocumentEl.className =
+    currentView === 'canvas'
+      ? 'canvas-column document-container drag-phantom'
+      : 'grid-section document-container drag-phantom';
+  if (currentView === 'canvas') {
+    phantomDocumentEl.style.width = `${canvasZoomState.columnWidth * canvasZoomState.bakedZoom}px`;
+  } else {
+    phantomDocumentEl.style.width = '';
+    phantomDocumentEl.querySelector('.grid-pages').style.gridTemplateColumns =
+      `repeat(${Math.max(1, dragPayload?.pageIds.length ?? 1)}, var(--grid-col-width))`;
+  }
+
+  if (position === 'start') wrapper.prepend(phantomDocumentEl);
+  else wrapper.appendChild(phantomDocumentEl);
+  return phantomDocumentEl.querySelector('.canvas-pages, .grid-pages');
+}
+
+// Rearranges the DOM to show what dropping right now would produce.
+function applyDragPreview(target) {
+  const { pageIds } = dragPayload;
+
+  if (target.type === 'insert') {
+    removePhantomDocument();
+    const insertion = target.beforePageId ? { beforePageId: target.beforePageId } : { atEnd: true };
+    moveSlotsInDom(pageIds, target.documentId, insertion);
     return;
   }
 
   if (target.type === 'new-document') {
-    setPlaceholderDropHighlight(null);
-    const containers = [...getActiveContainer().querySelectorAll('.document-container')];
-    const edgeContainer = target.position === 'start' ? containers[0] : containers[containers.length - 1];
-    const r = edgeContainer.getBoundingClientRect();
-    if (currentView === 'canvas') {
-      const x = target.position === 'start' ? r.left : r.right;
-      positionIndicator({ left: x, top: r.top, width: 0, height: r.height }, 'vertical');
-    } else {
-      const y = target.position === 'start' ? r.top : r.bottom;
-      positionIndicator({ left: r.left, top: y, width: r.width, height: 0 }, 'horizontal');
+    const pagesWrap = ensurePhantomDocument(target.position);
+    for (const pageId of pageIds) {
+      const slot = getActiveContainer().querySelector(`.page-slot[data-page-id="${pageId}"]`);
+      if (slot) {
+        const originWrap = slot.closest('.canvas-pages, .grid-pages');
+        pagesWrap.appendChild(slot);
+        restorePlaceholderIfEmpty(originWrap);
+      }
     }
-    return;
   }
-
-  // type === 'insert'
-  const container = getActiveContainer().querySelector(
-    `.document-container[data-document-id="${target.documentId}"]`,
-  );
-  const pagesContainer = container?.querySelector('.canvas-pages, .grid-pages');
-  const placeholder = pagesContainer?.querySelector('.placeholder-slot');
-  if (placeholder) {
-    // Empty document: no neighboring page for a bar to dock against — the
-    // placeholder itself is marked as the target instead.
-    dropIndicatorEl.style.display = 'none';
-    setPlaceholderDropHighlight(placeholder);
-    return;
-  }
-  setPlaceholderDropHighlight(null);
-
-  const remainingSlots = pagesContainer
-    ? [...pagesContainer.querySelectorAll('.page-slot')].filter((s) => !s.classList.contains('drag-source'))
-    : [];
-  const referenceSlot = target.beforePageId
-    ? pagesContainer?.querySelector(`.page-slot[data-page-id="${target.beforePageId}"]`)
-    : null;
-  const fallbackSlot = remainingSlots.at(-1);
-  const slot = referenceSlot ?? fallbackSlot;
-  if (!slot) {
-    dropIndicatorEl.style.display = 'none';
-    return;
-  }
-  const r = slot.getBoundingClientRect();
-
-  if (currentView === 'canvas') {
-    const top = referenceSlot ? r.top : r.bottom;
-    positionIndicator({ left: r.left, top, width: r.width, height: 0 }, 'horizontal');
-  } else {
-    const left = referenceSlot ? r.left : r.right;
-    positionIndicator({ left, top: r.top, width: 0, height: r.height }, 'vertical');
-  }
+  // 'invalid' (the gap between two documents): deliberately leaves the
+  // preview where it is rather than snapping back, so passing through a gap
+  // on the way somewhere else doesn't make the pages jump around.
 }
 
 function handleDragOver(event) {
@@ -964,8 +996,27 @@ function handleDragOver(event) {
   if (!dragPayload) return; // external file drop (6.x) — handled separately
   event.preventDefault();
   event.dataTransfer.dropEffect = 'move';
-  lastDropTarget = computeDropTarget(event.clientX, event.clientY);
-  updateDropIndicator(lastDropTarget);
+
+  const target = computeDropTarget(event.clientX, event.clientY);
+  if (samePageDropTarget(target, lastDropTarget)) return;
+
+  // Hysteresis: rearranging the preview can move the page out from under the
+  // cursor, which makes the next event compute the previous target again.
+  // Requiring real pointer travel before adopting a different target stops
+  // the two from alternating on a cell boundary. The first target of a drag
+  // has no previous point and is adopted immediately.
+  if (lastPreviewPoint) {
+    const dx = event.clientX - lastPreviewPoint.x;
+    const dy = event.clientY - lastPreviewPoint.y;
+    if (Math.hypot(dx, dy) < DRAG_PREVIEW_HYSTERESIS_PX) return;
+  }
+
+  const positions = captureLayoutPositions(getActiveContainer());
+  applyDragPreview(target);
+  playLayoutShift(currentView === 'canvas' ? canvasZoomState : gridZoomState, positions);
+
+  lastDropTarget = target;
+  lastPreviewPoint = { x: event.clientX, y: event.clientY };
 }
 
 // Moves the actual, already-rendered DOM nodes of the dragged pages
@@ -1006,17 +1057,21 @@ function moveSlotsInDom(pageIds, toDocumentId, insertion) {
     else toPagesWrap.appendChild(slot);
   }
 
-  // Source document(s) left completely empty by this immediately get their
-  // placeholder back (otherwise the section would stay wrongly empty, without
-  // the dashed placeholder box, until the next rebuild).
-  for (const wrap of sourceWraps) {
-    if (wrap.children.length === 0) {
-      const state = currentView === 'canvas' ? canvasZoomState : gridZoomState;
-      wrap.appendChild(createPlaceholderSlot(state));
-    }
-  }
+  for (const wrap of sourceWraps) restorePlaceholderIfEmpty(wrap);
 
   return affectedDocumentIds;
+}
+
+// A source document left completely empty immediately gets its placeholder
+// back — otherwise the section would sit there wrongly empty, without the
+// dashed drop-target box, until something else re-rendered it.
+function restorePlaceholderIfEmpty(wrap) {
+  if (!wrap || wrap.children.length > 0) return;
+  // A phantom document is not a real one and never shows a placeholder: it
+  // exists only for as long as pages are held over it.
+  if (wrap.closest('.drag-phantom')) return;
+  const state = currentView === 'canvas' ? canvasZoomState : gridZoomState;
+  wrap.appendChild(createPlaceholderSlot(state));
 }
 
 // Grid with column count "--" (gridColumnsPerRow === 'all'): the column
@@ -1175,19 +1230,25 @@ function handleDrop(event) {
 
   if (target.type === 'insert') {
     const insertion = target.beforePageId ? { beforePageId: target.beforePageId } : { atEnd: true };
+    // The DOM is already in this shape thanks to the live preview — this is
+    // the safety net for a drop where no dragover ever changed the target.
     const affectedDocumentIds = moveSlotsInDom(pageIds, target.documentId, insertion);
     store.movePages(pageIds, target.documentId, insertion, { silent: true });
     syncAllColumnsGridWidth(affectedDocumentIds);
     for (const documentId of affectedDocumentIds) syncDirtyDot(documentId);
+    pageDropCompleted = true;
   } else if (target.type === 'new-document') {
-    // New document = new column/section including a header — a structurally
-    // bigger DOM change than a simple move, so this deliberately still uses
-    // the normal full rebuild (a much rarer case than normal reordering).
+    // The phantom stood in for a document that did not exist yet; the real
+    // one is created now, and the reconcile that follows builds its container
+    // for real. Removing the phantom first keeps the pages' slots from being
+    // reparented into an element that is about to be discarded.
+    removePhantomDocument();
     store.createDocumentFromPages(pageIds, target.position);
+    pageDropCompleted = true;
   }
   // type === 'invalid' (gap between two documents, 3.2): deliberately do
-  // nothing — the page was never removed from the model, so it visually
-  // "falls" back to its original spot automatically.
+  // nothing — the model was never touched, so cleanupDrag()'s reconcile puts
+  // the previewed pages back where they came from.
 
   cleanupDrag();
 }
