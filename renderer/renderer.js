@@ -437,6 +437,91 @@ function syncDerivedCellSizes() {
   gridZoomState.spacing['--grid-col-width'] = Math.ceil(max.width * BASE_GRID_SCALE) + 1;
 }
 
+// --- Animating a layout shift (FLIP) -----------------------------------
+// When the shared cell size changes — the last large page is closed, a page
+// is rotated into landscape — every page keeps its own size but moves to a
+// new position. Jumping there is hard to follow; sliding makes it obvious
+// that pages moved closer together (or further apart) rather than changed.
+//
+// FLIP rather than a CSS transition on the track width: the pages do not
+// change size at all here (that is the whole point of deriving the cell from
+// the largest page instead of rescaling), so only their positions need to
+// animate. Transitioning `grid-template-columns` would relayout the grid on
+// every frame; transforms are composited and touch no layout.
+//
+// Deliberately NOT wired into applyBakedSizes(), which changes the very same
+// values on every zoom rebake: animating there would reintroduce exactly the
+// flicker that several rounds of work removed (see the zoom entries in
+// LESSONS.md). This runs only when the derived cell size actually changed.
+const LAYOUT_SHIFT_MS = 180;
+let layoutShiftsRunning = 0;
+
+const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+function captureLayoutPositions(container) {
+  const positions = new Map();
+  for (const el of container.querySelectorAll('.document-container, .page-slot, .placeholder-slot')) {
+    const rect = el.getBoundingClientRect();
+    positions.set(el, { left: rect.left, top: rect.top });
+  }
+  return positions;
+}
+
+// Plays every element that moved from its captured position back to it, then
+// releases it — so the browser animates the element into the layout it is
+// already in, rather than the layout being animated.
+function playLayoutShift(state, positions) {
+  if (prefersReducedMotion.matches) return;
+
+  // Deltas are measured in screen pixels, but a transform on a child of the
+  // zoom wrapper is applied in the wrapper's own (CSS-`zoom`-scaled) space.
+  const zoomScale = Number.parseFloat(state.wrapper.style.zoom) || 1;
+  const moved = [];
+
+  for (const [el, before] of positions) {
+    if (!el.isConnected) continue;
+    const rect = el.getBoundingClientRect();
+    let dx = before.left - rect.left;
+    let dy = before.top - rect.top;
+
+    // A slot inside a container that itself moved is already carried along by
+    // its container's animation — only its movement WITHIN the container is
+    // its own, otherwise the two would compound and overshoot.
+    const container = el.classList.contains('document-container') ? null : el.closest('.document-container');
+    const containerBefore = container && positions.get(container);
+    if (containerBefore) {
+      const containerRect = container.getBoundingClientRect();
+      dx -= containerBefore.left - containerRect.left;
+      dy -= containerBefore.top - containerRect.top;
+    }
+
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+    el.style.transition = 'none';
+    el.style.transform = `translate(${dx / zoomScale}px, ${dy / zoomScale}px)`;
+    moved.push(el);
+  }
+
+  if (moved.length === 0) return;
+
+  layoutShiftsRunning += 1;
+  requestAnimationFrame(() => {
+    for (const el of moved) {
+      el.style.transition = `transform ${LAYOUT_SHIFT_MS}ms ease-out`;
+      el.style.transform = '';
+    }
+    // Cleared on a timer rather than per-element `transitionend`: an element
+    // removed mid-animation never fires that event, and a stuck inline
+    // `transition` would then silently animate the next drag preview too.
+    setTimeout(() => {
+      for (const el of moved) {
+        el.style.transition = '';
+        el.style.transform = '';
+      }
+      layoutShiftsRunning -= 1;
+    }, LAYOUT_SHIFT_MS + 60);
+  });
+}
+
 // Brings everything that isn't part of the actual page rendering but still
 // has a fixed pixel size to the currently baked zoom level: still-invisible
 // placeholder slots, (Canvas only) the column width, and all spacing/
@@ -2050,8 +2135,25 @@ function scheduleRebake(state) {
 // CDP test harness to wait for a settled view instead of sleeping a fixed
 // amount and hoping — see the comment inside scheduleRebake().
 function isViewIdleForTests() {
-  return [canvasZoomState, gridZoomState]
-    .every((state) => !state.rebakeTimer && !state.rebakeRunning);
+  // A running layout animation counts as not-idle for the same reason a
+  // pending rebake does: while it plays, getBoundingClientRect() reports the
+  // transformed (in-flight) position, so anything measuring geometry would
+  // read a value that depends purely on when it happened to look.
+  return layoutShiftsRunning === 0 && !isRebaking();
+}
+
+function isRebaking() {
+  return [canvasZoomState, gridZoomState].some((state) => state.rebakeTimer || state.rebakeRunning);
+}
+
+// Whether a FLIP layout animation is currently in flight. Exposed separately
+// from isViewIdleForTests() so a test can tell the two kinds of "busy" apart
+// — specifically to assert that a zoom rebake does NOT animate, which is
+// otherwise indistinguishable from "the rebake is busy". Inspecting
+// `style.transform` cannot answer this: FLIP sets the offset and releases it
+// on the very next frame, so it is only observable for a single frame.
+function isLayoutAnimatingForTests() {
+  return layoutShiftsRunning > 0;
 }
 
 // Manually zooming/panning while in focus mode automatically exits it.
@@ -2487,10 +2589,24 @@ function renderGridView() {
 }
 
 function renderActiveView() {
+  const state = currentView === 'canvas' ? canvasZoomState : gridZoomState;
+  const previousCellWidth = state.cellSize.width;
+
   // Before either view is built: both of them read the derived cell size
-  // while laying out (column width, grid track width, slot sizes).
+  // while laying out (column width, grid track width, slot sizes). This only
+  // touches JS state — the DOM still reflects the old layout until the
+  // reconcile below, which is what makes the measurement underneath valid.
   syncDerivedCellSizes();
+
   const hasDocuments = store.documents.length > 0;
+  // Only a changed cell moves pages without resizing them, which is the one
+  // case worth animating. Every other render either changes nothing about
+  // positions or is a structural change the user just made themselves.
+  const positions =
+    hasDocuments && state.cellSize.width !== previousCellWidth
+      ? captureLayoutPositions(state.container)
+      : null;
+
   emptyState.classList.toggle('hidden', hasDocuments);
   canvasView.classList.toggle('hidden', !hasDocuments || currentView !== 'canvas');
   gridView.classList.toggle('hidden', !hasDocuments || currentView !== 'grid');
@@ -2503,6 +2619,8 @@ function renderActiveView() {
   } else {
     renderGridView();
   }
+
+  if (positions) playLayoutShift(state, positions);
 }
 
 store.subscribe(renderActiveView);
@@ -2761,4 +2879,5 @@ export {
   switchLocale,
   resetViewStateForTests,
   isViewIdleForTests,
+  isLayoutAnimatingForTests,
 };
